@@ -407,7 +407,7 @@ export class AIService {
       this.config.googleApiKey.trim() !== "" &&
       !this.config.googleApiKey.includes("••")
     ) {
-      models.push("gemini-pro", "gemini-pro-vision");
+      models.push("gemini-2.5-pro", "gemini-2.5-flash");
     }
 
     return models;
