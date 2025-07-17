@@ -30,6 +30,8 @@ export function AgentChatDrawer({
   const [userMessage, setUserMessage] = useState("");
   const [conversation, setConversation] = useState<AgentMessage[]>([]);
   const [isAgentResponding, setIsAgentResponding] = useState(false);
+  const [thoughtSteps, setThoughtSteps] = useState<string[]>([]);
+  const [showThoughts, setShowThoughts] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Load conversation when agent changes or drawer opens
@@ -75,6 +77,7 @@ export function AgentChatDrawer({
     }
 
     setIsAgentResponding(true);
+    setThoughtSteps(["Received input", "Analyzing message..."]);
 
     try {
       // Add message to UI immediately
@@ -91,10 +94,15 @@ export function AgentChatDrawer({
       setUserMessage("");
 
       // Get response from agent
-      const response = await AgentExecution.sendMessage(agent.id, userMessage);
+      const response = await AgentExecution.sendMessage(
+        agent.id,
+        userMessage,
+        (step) => setThoughtSteps((prev) => [...prev, step])
+      );
 
       // Add response to conversation
       setConversation((prev) => [...prev, response]);
+      setThoughtSteps([]);
     } catch (error) {
       console.error("Error sending message:", error);
 
@@ -107,6 +115,7 @@ export function AgentChatDrawer({
           timestamp: new Date().toISOString(),
         },
       ]);
+      setThoughtSteps(["Error occurred while processing."]);
     } finally {
       setIsAgentResponding(false);
     }
@@ -131,11 +140,19 @@ export function AgentChatDrawer({
       <div className="fixed right-0 top-0 h-full w-[600px] lg:w-[700px] bg-background border-l shadow-lg flex flex-col">
         {/* Header */}
         <div className="border-b p-4 flex items-center justify-between">
-          <div className="flex items-center">
+          <div className="flex items-center gap-2">
             <Bot className="mr-2 h-5 w-5" />
             <h2 className="text-lg font-semibold">
               {agent?.config.name || "Agent Chat"}
             </h2>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setShowThoughts((v) => !v)}
+              className="ml-2"
+            >
+              {showThoughts ? "Hide Thoughts" : "Show Thoughts"}
+            </Button>
           </div>
           <Button
             variant="ghost"
@@ -150,66 +167,69 @@ export function AgentChatDrawer({
         {agent ? (
           <>
             <ScrollArea className="flex-1 p-4">
-              {conversation.length === 0 ? (
-                <div className="flex flex-col items-center justify-center h-full text-center p-4">
-                  <Bot className="h-12 w-12 text-muted-foreground mb-4" />
-                  <h3 className="text-lg font-medium mb-2">
-                    Start a conversation
-                  </h3>
-                  <p className="text-muted-foreground max-w-sm">
-                    Send a message to start chatting with {agent.config.name}.
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {conversation.map((message, index) => (
+              <div className="flex flex-col space-y-4">
+                {(showThoughts
+                  ? AgentExecution.getConversation(agent.id).messages.filter(
+                      (msg, idx, arr) =>
+                        !(msg.role === "system" && idx === 0 && arr.length > 0)
+                    )
+                  : conversation
+                ).map((message, index) => (
+                  <div
+                    key={index}
+                    className={`flex ${
+                      message.role === "agent" ? "justify-start" : "justify-end"
+                    }`}
+                  >
                     <div
-                      key={index}
-                      className={`flex ${
+                      className={`max-w-[70%] rounded-lg p-3 ${
                         message.role === "agent"
-                          ? "justify-start"
-                          : "justify-end"
+                          ? "bg-muted text-foreground border"
+                          : message.role === "system"
+                          ? "bg-muted text-muted-foreground text-center w-full"
+                          : "bg-primary text-primary-foreground"
                       }`}
                     >
-                      <div
-                        className={`max-w-[70%] rounded-lg p-3 ${
-                          message.role === "agent"
-                            ? "bg-muted text-foreground border"
-                            : "bg-primary text-primary-foreground"
-                        }`}
-                      >
-                        <div className="flex items-center mb-1 text-xs">
-                          {message.role === "agent" ? (
-                            <>
-                              <Bot className="h-3 w-3 mr-1" />
-                              <span>{agent.config.name}</span>
-                            </>
-                          ) : (
-                            <>
-                              <User className="h-3 w-3 mr-1" />
-                              <span>You</span>
-                            </>
-                          )}
-                          <span className="ml-auto">
-                            {formatTime(message.timestamp)}
-                          </span>
-                        </div>
-                        <div className="whitespace-pre-wrap text-sm">
-                          {message.content}
-                        </div>
+                      <div className="flex items-center mb-1 text-xs">
+                        {message.role === "agent" ? (
+                          <>
+                            <Bot className="h-3 w-3 mr-1" />
+                            <span>{agent.config.name}</span>
+                          </>
+                        ) : message.role === "user" ? (
+                          <>
+                            <User className="h-3 w-3 mr-1" />
+                            <span>You</span>
+                          </>
+                        ) : null}
+                        <span className="ml-auto">
+                          {formatTime(message.timestamp)}
+                        </span>
+                      </div>
+                      <div className="whitespace-pre-wrap text-sm">
+                        {message.content}
                       </div>
                     </div>
-                  ))}
-                  <div ref={messagesEndRef} />
-                </div>
-              )}
+                  </div>
+                ))}
+                {isAgentResponding && (
+                  <div className="flex flex-col items-start gap-2 p-3 rounded-lg bg-secondary">
+                    <Loader2 size={16} className="animate-spin" />
+                    <span>Thinking...</span>
+                    <ul className="list-disc ml-4 text-xs text-muted-foreground animate-pulse">
+                      {thoughtSteps.map((step, i) => (
+                        <li key={i}>{step}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                <div ref={messagesEndRef} />
+              </div>
             </ScrollArea>
-
+            {/* Footer: Always show input, send button, and thoughts toggle when agent is selected */}
             <Separator />
-
-            {/* Footer */}
             <div className="mt-auto p-4 pt-2 border-t">
-              <div className="flex gap-3">
+              <div className="flex gap-3 items-end">
                 <Textarea
                   placeholder="Type your message..."
                   value={userMessage}
@@ -226,7 +246,7 @@ export function AgentChatDrawer({
                 <Button
                   onClick={handleSendMessage}
                   disabled={!userMessage.trim() || isAgentResponding}
-                  className="self-end h-[80px] w-[60px] flex-shrink-0"
+                  className="h-[80px] w-[60px] flex-shrink-0"
                 >
                   {isAgentResponding ? (
                     <Loader2 className="h-5 w-5 animate-spin" />
@@ -243,8 +263,8 @@ export function AgentChatDrawer({
             </div>
           </>
         ) : (
-          <div className="flex items-center justify-center h-full">
-            <p className="text-muted-foreground">No agent selected</p>
+          <div className="p-4 text-center">
+            <p>Select an agent to start chatting.</p>
           </div>
         )}
       </div>

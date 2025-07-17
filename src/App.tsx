@@ -28,6 +28,12 @@ const App = () => {
     AgentMemory.init();
     AgentExecution.init();
     AIService.init();
+
+    // Expose for debugging
+    // @ts-ignore
+    window.AgentMemory = AgentMemory;
+    // @ts-ignore
+    window.A2ACommunication = A2ACommunication;
   }, []);
 
   return (

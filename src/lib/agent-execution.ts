@@ -1,6 +1,11 @@
 import { v4 as uuidv4 } from "uuid";
 import { Agent } from "@/types";
 import { AgentMemory } from "./agent-memory";
+import { SharedVectorDB } from "./shared-vector-db";
+import { A2ACommunication } from "./a2a-communication";
+// Remove fs and path imports
+// Import agent_context.txt as a raw string
+import agentContext from "@/components/agents/agent_context.txt?raw";
 
 // Agent Execution types
 export interface AgentMessage {
@@ -14,6 +19,8 @@ export interface AgentConversation {
   messages: AgentMessage[];
   lastActive: string;
 }
+
+// Remove getAgentBaseContext function
 
 export class AgentExecution {
   private static conversations: Map<string, AgentConversation> = new Map();
@@ -38,6 +45,21 @@ export class AgentExecution {
       // Add to active agents
       this.activeAgents.add(agent.id);
 
+      // Prepare system prompt: prepend agent_context, then dynamic tool list, then user systemPrompt
+      let toolList = "";
+      if (agent.config.tools && agent.config.tools.length > 0) {
+        toolList =
+          "\n\nAVAILABLE TOOLS FOR THIS AGENT:\n" +
+          agent.config.tools
+            .map(
+              (tool: any) =>
+                `- ${tool.name || tool.id}: ${tool.description || ""}`
+            )
+            .join("\n");
+      }
+      const baseContext = agentContext;
+      const fullSystemPrompt = `${baseContext}${toolList}\n\n${agent.config.systemPrompt}`;
+
       // Initialize conversation if needed
       if (!this.conversations.has(agent.id)) {
         this.conversations.set(agent.id, {
@@ -45,7 +67,7 @@ export class AgentExecution {
           messages: [
             {
               role: "system",
-              content: agent.config.systemPrompt,
+              content: fullSystemPrompt,
               timestamp: new Date().toISOString(),
             },
           ],
@@ -65,6 +87,9 @@ export class AgentExecution {
         content: `Agent activated`,
         importance: 5,
       });
+
+      // After agent is started (in startAgent), embed agent profile in shared vector DB
+      SharedVectorDB.embedAgentProfile(agent);
 
       // Return updated agent
       const updatedAgent = { ...agent, status: "active" as const };
@@ -121,9 +146,11 @@ export class AgentExecution {
    */
   static async sendMessage(
     agentId: string,
-    message: string
+    message: string,
+    onThoughtStep?: (step: string) => void
   ): Promise<AgentMessage> {
     try {
+      if (onThoughtStep) onThoughtStep("Input received");
       // Get agent conversation
       const conversation = this.getConversation(agentId);
       if (!conversation) {
@@ -153,34 +180,125 @@ export class AgentExecution {
 
       // Get agent info for the response (agent name, type, etc.)
       const agent = this.getAgentDetails(agentId);
+      if (onThoughtStep) onThoughtStep("Generating agent response...");
 
       // Generate response based on agent type and message
-      const response = await this.generateAgentResponse(agent, message);
+      let response = await this.generateAgentResponse(agent, message);
 
-      // Create agent message
+      // Tool call detection and execution loop
+      let toolCall = parseToolCall(response);
+      let toolResult: string | null = null;
+      let toolMessages: AgentMessage[] = [];
+      while (toolCall) {
+        if (onThoughtStep)
+          onThoughtStep(`Detected tool call: ${toolCall.tool_call}`);
+        // Execute the tool
+        if (toolCall.tool_call === "LIST_AGENTS") {
+          if (onThoughtStep) onThoughtStep("Executing LIST_AGENTS tool...");
+          const storedAgents = localStorage.getItem("agents");
+          let agentList = [];
+          if (storedAgents) {
+            agentList = JSON.parse(storedAgents).map(
+              (a: any) => `- ${a.config.name} (ID: ${a.id})`
+            );
+          }
+          toolResult = `Available agents:\n${agentList.join("\n")}`;
+          if (onThoughtStep) onThoughtStep("Tool result received: LIST_AGENTS");
+        } else if (toolCall.tool_call === "SEND") {
+          const { to_id, message: msg } = toolCall.args || {};
+          if (to_id && msg) {
+            if (onThoughtStep) onThoughtStep("Executing SEND tool...");
+            // Find agent name
+            const storedAgents = localStorage.getItem("agents");
+            let toName = to_id;
+            if (storedAgents) {
+              const found = JSON.parse(storedAgents).find(
+                (a: any) => a.id === to_id
+              );
+              if (found) toName = found.config.name;
+            }
+            await (
+              await import("./a2a-communication")
+            ).A2ACommunication.sendMessage(
+              agentId,
+              agent?.config?.name || agentId,
+              to_id,
+              toName,
+              msg
+            );
+            toolResult = `Message sent to ${toName}.`;
+            if (onThoughtStep) onThoughtStep("Tool result received: SEND");
+          } else {
+            toolResult = "SEND tool requires to_id and message.";
+          }
+        } else if (toolCall.tool_call === "READ_MEMORY") {
+          const { key } = toolCall.args || {};
+          if (key) {
+            if (onThoughtStep) onThoughtStep("Executing READ_MEMORY tool...");
+            const value = (
+              await import("./shared-vector-db")
+            ).SharedVectorDB.query(key);
+            toolResult = `Memory for key '${key}': ${JSON.stringify(value)}`;
+            if (onThoughtStep)
+              onThoughtStep("Tool result received: READ_MEMORY");
+          } else {
+            toolResult = "READ_MEMORY tool requires key.";
+          }
+        } else if (toolCall.tool_call === "WRITE_MEMORY") {
+          const { key, value } = toolCall.args || {};
+          if (key && value !== undefined) {
+            if (onThoughtStep) onThoughtStep("Executing WRITE_MEMORY tool...");
+            (
+              await import("./shared-vector-db")
+            ).SharedVectorDB.embedAgentAction(agentId, key, value);
+            toolResult = `Wrote value to memory key '${key}'.`;
+            if (onThoughtStep)
+              onThoughtStep("Tool result received: WRITE_MEMORY");
+          } else {
+            toolResult = "WRITE_MEMORY tool requires key and value.";
+          }
+        } else {
+          toolResult = `Unknown tool: ${toolCall.tool_call}`;
+        }
+        // Inject tool result as a system message
+        const toolMsg: AgentMessage = {
+          role: "system",
+          content: toolResult,
+          timestamp: new Date().toISOString(),
+        };
+        toolMessages.push(toolMsg);
+        // Add to conversation
+        conversation.messages.push(toolMsg);
+        conversation.lastActive = toolMsg.timestamp;
+        // Save updated conversation
+        this.saveConversations();
+        if (onThoughtStep)
+          onThoughtStep("Re-prompting agent with tool result...");
+        // Re-prompt agent with tool result
+        response = await this.generateAgentResponse(agent, toolResult);
+        toolCall = parseToolCall(response);
+      }
+      // Create agent message (final response)
       const agentMessage: AgentMessage = {
         role: "agent",
         content: response,
         timestamp: new Date().toISOString(),
       };
-
       // Add to conversation
       conversation.messages.push(agentMessage);
       conversation.lastActive = agentMessage.timestamp;
-
       // Add to agent memory
       AgentMemory.addMemory(agentId, {
         type: "agent_response",
         content: response,
         importance: AgentMemory.assessImportance(response, "agent_response"),
       });
-
       // Save updated conversation
       this.saveConversations();
-
       return agentMessage;
     } catch (error) {
       console.error("Error sending message to agent:", error);
+      if (onThoughtStep) onThoughtStep("Error: " + error.message);
       throw error;
     }
   }
@@ -221,6 +339,9 @@ export class AgentExecution {
           result: response,
         },
       });
+
+      // After autonomous task is completed (in runAutonomousTask), embed task result in shared vector DB
+      SharedVectorDB.embedAgentAction(agent.id, task, response);
 
       return response;
     } catch (error) {
@@ -636,6 +757,42 @@ export class AgentExecution {
     this.loadConversations();
     this.loadActiveAgents();
   }
+
+  /**
+   * Programmatically call another agent as if it were an API (A2A)
+   */
+  static async callAgentAPI(
+    sourceAgentId: string,
+    targetAgentId: string,
+    message: string,
+    metadata?: Record<string, any>
+  ) {
+    // Get agent details for names
+    const sourceAgent = this.getAgentDetails(sourceAgentId);
+    const targetAgent = this.getAgentDetails(targetAgentId);
+    if (!sourceAgent || !targetAgent) throw new Error("Agent not found");
+    return await A2ACommunication.sendMessage(
+      sourceAgentId,
+      sourceAgent.config.name,
+      targetAgentId,
+      targetAgent.config.name,
+      message,
+      metadata
+    );
+  }
+}
+
+// Helper: Check if a string is a tool call JSON
+function parseToolCall(
+  response: string
+): { tool_call: string; args: any } | null {
+  try {
+    const obj = JSON.parse(response);
+    if (obj && typeof obj === "object" && obj.tool_call) {
+      return obj;
+    }
+  } catch (e) {}
+  return null;
 }
 
 // Initialization is now handled via the init() method called from App.tsx
