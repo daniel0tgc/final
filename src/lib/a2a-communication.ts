@@ -16,54 +16,19 @@ export interface A2AMessage {
   metadata?: Record<string, any>;
 }
 
+const API_BASE = "/api";
+
 // A2A Communication class
 export class A2ACommunication {
-  private static readonly STORAGE_KEY = "a2a_messages";
-  private static messages: A2AMessage[] = [];
-  private static initialized = false;
-
   /**
    * Public method to initialize the A2A communication system
    */
   static init(): void {
-    this.initialize();
+    // No initialization needed for backend storage
   }
 
   /**
-   * Initialize the A2A communication system
-   */
-  private static initialize(): void {
-    if (this.initialized) return;
-
-    try {
-      // Load messages from localStorage
-      const storedMessages = localStorage.getItem(this.STORAGE_KEY);
-      if (storedMessages) {
-        this.messages = JSON.parse(storedMessages);
-      }
-
-      this.initialized = true;
-    } catch (error) {
-      console.error("Failed to initialize A2A Communication:", error);
-      // Initialize with empty array if there's an error
-      this.messages = [];
-      this.initialized = true;
-    }
-  }
-
-  /**
-   * Save messages to localStorage
-   */
-  private static saveMessages(): void {
-    try {
-      localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.messages));
-    } catch (error) {
-      console.error("Failed to save A2A messages:", error);
-    }
-  }
-
-  /**
-   * Send a message from one agent to another
+   * Send a message from one agent to another (store in backend/Redis)
    */
   static async sendMessage(
     sourceAgentId: string,
@@ -73,9 +38,6 @@ export class A2ACommunication {
     message: string,
     metadata?: Record<string, any>
   ): Promise<A2AMessage> {
-    this.initialize();
-
-    // Create new message with pending status
     const newMessage: A2AMessage = {
       id: uuidv4(),
       sourceAgentId,
@@ -87,113 +49,38 @@ export class A2ACommunication {
       status: "pending",
       metadata: { ...(metadata || {}), a2a: true },
     };
-
-    // Add to messages array
-    this.messages.push(newMessage);
-    this.saveMessages();
-
-    try {
-      // Simulate message delivery (in a real implementation, this would be an API call or event)
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      // 5% chance of random failure for demo purposes
-      if (Math.random() < 0.05) {
-        throw new Error("Communication channel error");
-      }
-
-      // Update message status to success
-      const updatedMessage = { ...newMessage, status: "success" as const };
-      this.updateMessage(updatedMessage);
-
-      // Add observation to target agent's memory
-      AgentMemory.addMemory(targetAgentId, {
-        type: "message_received",
-        content: `Received message from ${sourceAgentName}: ${message}`,
-        importance: AgentMemory.assessImportance(message, "message_received"),
-        metadata: {
-          sourceAgentId,
-          sourceAgentName,
-          messageId: newMessage.id,
-          a2a: true,
-        },
-      });
-
-      // Log incoming A2A message in target agent's conversation
-      const targetConversation = AgentExecution.getConversation(targetAgentId);
-      targetConversation.messages.push({
-        role: "user",
-        content: `[A2A] ${sourceAgentName}: ${message}`,
-        timestamp: new Date().toISOString(),
-      });
-      targetConversation.lastActive = new Date().toISOString();
-      AgentExecution["saveConversations"]();
-
-      // Automatically trigger the recipient agent to process the message and respond
-      const agentResponse = await AgentExecution.sendMessage(
-        targetAgentId,
-        message
-      );
-
-      // Send the response back to the original sender as an A2A message
-      await A2ACommunication.sendMessage(
-        targetAgentId,
-        targetAgentName,
-        sourceAgentId,
-        sourceAgentName,
-        agentResponse.content,
-        { a2a: true, in_reply_to: newMessage.id }
-      );
-
-      return updatedMessage;
-    } catch (error) {
-      // Update message status to error
-      const errorMessage =
-        error instanceof Error ? error.message : "Unknown error";
-      const updatedMessage = {
-        ...newMessage,
-        status: "error" as const,
-        error: errorMessage,
-      };
-      this.updateMessage(updatedMessage);
-
-      // Add failure observation to source agent's memory
-      AgentMemory.addMemory(sourceAgentId, {
-        type: "observation",
-        content: `Failed to send message to ${targetAgentName}: ${errorMessage}`,
-        importance: 7,
-        metadata: {
-          targetAgentId,
-          targetAgentName,
-          messageId: newMessage.id,
-          error: errorMessage,
-          a2a: true,
-        },
-      });
-
-      return updatedMessage;
-    }
+    // Store in Redis via backend
+    await fetch(`${API_BASE}/memory/set`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: `a2a:messages`, value: newMessage }),
+    });
+    // For now, return the message as pending; UI should poll for updates
+    return newMessage;
   }
 
   /**
    * Update an existing message
    */
   private static updateMessage(updatedMessage: A2AMessage): void {
-    const index = this.messages.findIndex(
-      (msg) => msg.id === updatedMessage.id
+    // This method is no longer needed as messages are stored in backend
+    console.warn(
+      "updateMessage is deprecated as messages are stored in backend."
     );
-    if (index !== -1) {
-      this.messages[index] = updatedMessage;
-      this.saveMessages();
-    }
   }
 
   /**
    * Get all messages for a specific agent (sent or received)
    */
-  static getAgentLogs(agentId: string): A2AMessage[] {
-    this.initialize();
-
-    return this.messages.filter(
+  static async getAgentLogs(agentId: string): Promise<A2AMessage[]> {
+    const res = await fetch(`${API_BASE}/memory/get/a2a:messages`);
+    const data = await res.json();
+    const allMessages: A2AMessage[] = Array.isArray(data.value)
+      ? data.value
+      : data.value
+      ? [data.value]
+      : [];
+    return allMessages.filter(
       (msg) => msg.sourceAgentId === agentId || msg.targetAgentId === agentId
     );
   }
@@ -201,10 +88,18 @@ export class A2ACommunication {
   /**
    * Get conversation between two specific agents
    */
-  static getConversation(agent1Id: string, agent2Id: string): A2AMessage[] {
-    this.initialize();
-
-    return this.messages.filter(
+  static async getConversation(
+    agent1Id: string,
+    agent2Id: string
+  ): Promise<A2AMessage[]> {
+    const res = await fetch(`${API_BASE}/memory/get/a2a:messages`);
+    const data = await res.json();
+    const allMessages: A2AMessage[] = Array.isArray(data.value)
+      ? data.value
+      : data.value
+      ? [data.value]
+      : [];
+    return allMessages.filter(
       (msg) =>
         (msg.sourceAgentId === agent1Id && msg.targetAgentId === agent2Id) ||
         (msg.sourceAgentId === agent2Id && msg.targetAgentId === agent1Id)
@@ -214,76 +109,78 @@ export class A2ACommunication {
   /**
    * Get all sent messages by an agent
    */
-  static getSentMessages(agentId: string): A2AMessage[] {
-    this.initialize();
-
-    return this.messages.filter((msg) => msg.sourceAgentId === agentId);
+  static async getSentMessages(agentId: string): Promise<A2AMessage[]> {
+    const allMessages = await this.getAgentLogs(agentId);
+    return allMessages.filter((msg) => msg.sourceAgentId === agentId);
   }
 
   /**
    * Get all received messages by an agent
    */
-  static getReceivedMessages(agentId: string): A2AMessage[] {
-    this.initialize();
-
-    return this.messages.filter((msg) => msg.targetAgentId === agentId);
+  static async getReceivedMessages(agentId: string): Promise<A2AMessage[]> {
+    const allMessages = await this.getAgentLogs(agentId);
+    return allMessages.filter((msg) => msg.targetAgentId === agentId);
   }
 
   /**
    * Delete a specific message (only allowed by source agent)
    */
-  static deleteMessage(messageId: string, requestingAgentId: string): boolean {
-    this.initialize();
-
-    const messageIndex = this.messages.findIndex((msg) => msg.id === messageId);
-
-    // Message not found
-    if (messageIndex === -1) {
-      return false;
-    }
-
-    const message = this.messages[messageIndex];
-
-    // Only source agent can delete the message
-    if (message.sourceAgentId !== requestingAgentId) {
-      return false;
-    }
-
-    // Remove message
-    this.messages.splice(messageIndex, 1);
-    this.saveMessages();
-
+  static async deleteMessage(
+    messageId: string,
+    requestingAgentId: string
+  ): Promise<boolean> {
+    // Fetch all messages, filter out the one to delete, and overwrite
+    const res = await fetch(`${API_BASE}/memory/get/a2a:messages`);
+    const data = await res.json();
+    let allMessages: A2AMessage[] = Array.isArray(data.value)
+      ? data.value
+      : data.value
+      ? [data.value]
+      : [];
+    const message = allMessages.find((msg) => msg.id === messageId);
+    if (!message || message.sourceAgentId !== requestingAgentId) return false;
+    allMessages = allMessages.filter((msg) => msg.id !== messageId);
+    await fetch(`${API_BASE}/memory/set`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: `a2a:messages`, value: allMessages }),
+    });
     return true;
   }
 
   /**
-   * Clear all logs for a specific agent
+   * Clear all A2A messages for an agent (removes all messages sent or received by agent)
    */
-  static clearLogs(agentId: string): boolean {
-    this.initialize();
-
-    // Filter out messages related to this agent
-    this.messages = this.messages.filter(
+  static async clearLogs(agentId: string): Promise<boolean> {
+    const res = await fetch(`${API_BASE}/memory/get/a2a:messages`);
+    const data = await res.json();
+    let allMessages: A2AMessage[] = Array.isArray(data.value)
+      ? data.value
+      : data.value
+      ? [data.value]
+      : [];
+    allMessages = allMessages.filter(
       (msg) => msg.sourceAgentId !== agentId && msg.targetAgentId !== agentId
     );
-
-    this.saveMessages();
+    await fetch(`${API_BASE}/memory/set`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: `a2a:messages`, value: allMessages }),
+    });
     return true;
   }
 
   /**
    * Get summary stats for agent communications
    */
-  static getAgentStats(agentId: string): {
+  static async getAgentStats(agentId: string): Promise<{
     totalSent: number;
     totalReceived: number;
     successRate: number;
     uniqueAgents: number;
-  } {
-    this.initialize();
-
-    const sent = this.getSentMessages(agentId);
-    const received = this.getReceivedMessages(agentId);
+  }> {
+    const sent = await this.getSentMessages(agentId);
+    const received = await this.getReceivedMessages(agentId);
 
     const successfulSent = sent.filter(
       (msg) => msg.status === "success"
@@ -304,4 +201,16 @@ export class A2ACommunication {
       uniqueAgents: uniqueAgentIds.size,
     };
   }
+}
+
+// Fetch cross-agent communication logs from long-term memory (PostgreSQL)
+export async function getCrossAgentLogs(agentId: string) {
+  const res = await fetch(
+    `/api/longterm/get/${agentId}/cross_agent:log:${agentId}`
+  );
+  const data = await res.json();
+  // The value may be a single entry or an array; normalize to array
+  if (Array.isArray(data.value)) return data.value;
+  if (data.value) return [data.value];
+  return [];
 }

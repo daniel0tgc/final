@@ -9,73 +9,30 @@ export interface MemoryEntry {
     | "agent_response"
     | "observation"
     | "reflection"
-    | "message_received";
+    | "message_received"
+    | "system";
   content: string;
   importance: number;
   timestamp: string;
   metadata?: Record<string, any>;
 }
 
+// Utility for backend API base URL
+const API_BASE = "/api";
+
 // Agent Memory class
 export class AgentMemory {
-  private static readonly STORAGE_KEY = "agent_memories";
-  private static memories: Map<string, MemoryEntry[]> = new Map();
-  private static initialized = false;
-
   /**
    * Public method to initialize the agent memory system
    */
   static init(): void {
-    this.initialize();
+    // No initialization needed for backend storage
   }
 
   /**
-   * Initialize the agent memory system
+   * Add a new short-term memory entry for an agent (stored in Redis)
    */
-  private static initialize(): void {
-    if (this.initialized) return;
-
-    try {
-      // Load memories from localStorage
-      const storedMemories = localStorage.getItem(this.STORAGE_KEY);
-      if (storedMemories) {
-        const parsed = JSON.parse(storedMemories);
-
-        // Convert from object to Map for easier access
-        for (const agentId in parsed) {
-          this.memories.set(agentId, parsed[agentId]);
-        }
-      }
-
-      this.initialized = true;
-    } catch (error) {
-      console.error("Failed to initialize Agent Memory:", error);
-      // Initialize with empty map if there's an error
-      this.memories = new Map();
-      this.initialized = true;
-    }
-  }
-
-  /**
-   * Save all memories to localStorage
-   */
-  private static saveMemories(): void {
-    try {
-      // Convert Map to Object for storage
-      const memoriesObj: Record<string, MemoryEntry[]> = {};
-      for (const [agentId, entries] of this.memories.entries()) {
-        memoriesObj[agentId] = entries;
-      }
-      localStorage.setItem(this.STORAGE_KEY, JSON.stringify(memoriesObj));
-    } catch (error) {
-      console.error("Failed to save agent memories:", error);
-    }
-  }
-
-  /**
-   * Add a new memory entry for an agent
-   */
-  static addMemory(
+  static async addMemory(
     agentId: string,
     {
       type,
@@ -88,95 +45,68 @@ export class AgentMemory {
       importance?: number;
       metadata?: Record<string, any>;
     }
-  ): MemoryEntry {
-    this.initialize();
-
-    // If importance is not provided, calculate it
-    if (importance === undefined) {
-      importance = this.assessImportance(content, type);
-    }
-
-    // Create new memory entry
-    const newEntry: MemoryEntry = {
+  ): Promise<MemoryEntry | null> {
+    const entry: MemoryEntry = {
       id: uuidv4(),
       agentId,
       type,
       content,
-      importance,
+      importance: importance ?? this.assessImportance(content, type),
       timestamp: new Date().toISOString(),
       metadata,
     };
-
-    // Get or create agent's memory array
-    if (!this.memories.has(agentId)) {
-      this.memories.set(agentId, []);
-    }
-
-    // Add new entry
-    const agentMemories = this.memories.get(agentId)!;
-    agentMemories.push(newEntry);
-
-    // Apply memory management policies
-    this.applyMemoryPolicies(agentId);
-
-    // Save to localStorage
-    this.saveMemories();
-
-    return newEntry;
-  }
-
-  /**
-   * Get all memories for an agent
-   */
-  static getMemories(agentId: string): MemoryEntry[] {
-    this.initialize();
-
-    return this.memories.get(agentId) || [];
-  }
-
-  /**
-   * Apply memory management policies (e.g., pruning old memories)
-   */
-  private static applyMemoryPolicies(agentId: string): void {
-    const agentMemories = this.memories.get(agentId);
-    if (!agentMemories) return;
-
-    // Sort by importance (highest first) and timestamp (newest first)
-    agentMemories.sort((a, b) => {
-      if (a.importance !== b.importance) {
-        return b.importance - a.importance;
-      }
-      return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+    // Fetch current array, append, and save back
+    const res = await fetch(`${API_BASE}/memory/get/agent:${agentId}:memories`);
+    let current: MemoryEntry[] = [];
+    try {
+      const data = await res.json();
+      if (Array.isArray(data.value)) current = data.value;
+      else if (data.value) current = [data.value];
+    } catch {}
+    const updated = [...current, entry];
+    await fetch(`${API_BASE}/memory/set`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key: `agent:${agentId}:memories`,
+        value: updated,
+      }),
     });
-
-    // Limit to 200 memories per agent for performance
-    // Note: In a real implementation, consider more sophisticated strategies
-    // like differential storage based on importance
-    const MAX_MEMORIES = 200;
-    if (agentMemories.length > MAX_MEMORIES) {
-      this.memories.set(agentId, agentMemories.slice(0, MAX_MEMORIES));
-    }
+    return entry;
   }
 
   /**
-   * Clear all memories for an agent
+   * Get all short-term memories for an agent (from Redis)
    */
-  static clearMemories(agentId: string): boolean {
-    this.initialize();
+  static async getMemories(agentId: string): Promise<MemoryEntry[]> {
+    const res = await fetch(`${API_BASE}/memory/get/agent:${agentId}:memories`);
+    const data = await res.json();
+    if (Array.isArray(data.value)) return data.value;
+    if (data.value) return [data.value];
+    return [];
+  }
 
-    this.memories.delete(agentId);
-    this.saveMemories();
-
+  /**
+   * Clear all short-term memories for an agent (in Redis)
+   */
+  static async clearMemories(agentId: string): Promise<boolean> {
+    // Overwrite with empty array
+    await fetch(`${API_BASE}/memory/set`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ key: `agent:${agentId}:memories`, value: [] }),
+    });
     return true;
   }
 
   /**
    * Search agent memories using a query
    */
-  static searchMemories(agentId: string, query: string): MemoryEntry[] {
-    this.initialize();
-
-    const agentMemories = this.memories.get(agentId) || [];
+  static async searchMemories(
+    agentId: string,
+    query: string
+  ): Promise<MemoryEntry[]> {
+    const agentMemories = await this.getMemories(agentId);
     const queryLower = query.toLowerCase();
 
     return agentMemories.filter((memory) =>
@@ -187,10 +117,11 @@ export class AgentMemory {
   /**
    * Get recent memories for an agent
    */
-  static getRecentMemories(agentId: string, limit: number = 10): MemoryEntry[] {
-    this.initialize();
-
-    const agentMemories = this.memories.get(agentId) || [];
+  static async getRecentMemories(
+    agentId: string,
+    limit: number = 10
+  ): Promise<MemoryEntry[]> {
+    const agentMemories = await this.getMemories(agentId);
 
     // Sort by timestamp (newest first)
     const sorted = [...agentMemories].sort(
@@ -204,13 +135,11 @@ export class AgentMemory {
   /**
    * Get most important memories for an agent
    */
-  static getImportantMemories(
+  static async getImportantMemories(
     agentId: string,
     limit: number = 10
-  ): MemoryEntry[] {
-    this.initialize();
-
-    const agentMemories = this.memories.get(agentId) || [];
+  ): Promise<MemoryEntry[]> {
+    const agentMemories = await this.getMemories(agentId);
 
     // Sort by importance (highest first)
     const sorted = [...agentMemories].sort(
@@ -221,68 +150,225 @@ export class AgentMemory {
   }
 
   /**
+   * Get a long-term fact for an agent (from PostgreSQL)
+   */
+  static async getFact(agentId: string, key: string): Promise<string | null> {
+    const res = await fetch(`${API_BASE}/longterm/get/${agentId}/${key}`);
+    const data = await res.json();
+    return data.value ?? null;
+  }
+
+  /**
+   * Set a long-term fact for an agent (in PostgreSQL)
+   */
+  static async setFact(
+    agentId: string,
+    key: string,
+    value: string
+  ): Promise<boolean> {
+    const res = await fetch(`${API_BASE}/longterm/set`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ agentId, key, value }),
+    });
+    return res.ok;
+  }
+
+  /**
+   * Apply memory management policies (e.g., pruning old memories)
+   */
+  private static applyMemoryPolicies(agentId: string): void {
+    // This method is no longer needed as memory is stored in Redis
+  }
+
+  /**
    * Assess the importance of a memory based on content and type
-   * This is a simple heuristic implementation
+   * Enhanced implementation inspired by Cursor's Memory Rating Prompt
    */
   static assessImportance(content: string, type: MemoryEntry["type"]): number {
     // Base importance by type
     let importance = 5; // default
 
     switch (type) {
-      case "observation":
-        importance = 5;
-        break;
-      case "reflection":
-        importance = 6;
-        break;
       case "user_message":
-        importance = 7;
+        importance = 7; // User input is generally important
         break;
       case "agent_response":
-        importance = 5;
+        importance = 5; // Standard responses
+        break;
+      case "observation":
+        importance = 6; // Environmental data
+        break;
+      case "reflection":
+        importance = 8; // Internal analysis is highly valuable
         break;
       case "message_received":
-        importance = 6;
+        importance = 6; // Cross-agent communication
+        break;
+      case "system":
+        importance = 7; // System-level information
         break;
     }
 
     const contentLower = content.toLowerCase();
 
-    // Check for important keywords
-    const importantKeywords = [
+    // Enhanced keyword analysis with weighted importance
+    const criticalKeywords = [
       "critical",
       "urgent",
+      "emergency",
+      "error",
+      "failed",
+      "broken",
+      "danger",
+      "crash",
+      "fatal",
+      "exception",
+      "timeout",
+      "deadline",
+    ];
+    const importantKeywords = [
       "important",
       "priority",
       "crucial",
       "essential",
-      "error",
-      "failed",
-      "warning",
-      "alert",
-      "danger",
-      "remember",
-      "don't forget",
       "key",
       "vital",
       "significant",
+      "major",
+      "primary",
+      "core",
+      "fundamental",
+    ];
+    const userEmphasisKeywords = [
+      "remember",
+      "don't forget",
+      "save this",
+      "keep in mind",
+      "note this",
+      "mark this",
+      "highlight",
+      "bookmark",
+      "save for later",
+      "important to me",
+    ];
+    const learningKeywords = [
+      "learned",
+      "discovered",
+      "found",
+      "realized",
+      "understood",
+      "pattern",
+      "insight",
+      "lesson",
+      "discovery",
+      "breakthrough",
+      "solution",
+      "fix",
+    ];
+    const negativeKeywords = [
+      "unimportant",
+      "trivial",
+      "minor",
+      "insignificant",
+      "not needed",
+      "can ignore",
+      "skip this",
+      "not relevant",
     ];
 
-    for (const keyword of importantKeywords) {
+    // Check for critical keywords (highest priority - immediate boost)
+    for (const keyword of criticalKeywords) {
       if (contentLower.includes(keyword)) {
-        importance += 1;
-        // Cap at 10
-        if (importance >= 10) {
-          return 10;
-        }
+        importance = Math.min(10, importance + 3);
+        break; // Only apply the highest critical keyword
       }
     }
 
-    // Adjust based on content length (longer content might be more detailed)
-    if (content.length > 500) importance += 1;
-    if (content.length < 20) importance -= 1;
+    // Check for important keywords (moderate boost)
+    for (const keyword of importantKeywords) {
+      if (contentLower.includes(keyword)) {
+        importance = Math.min(10, importance + 2);
+      }
+    }
+
+    // Check for user emphasis keywords (high priority - user intent)
+    for (const keyword of userEmphasisKeywords) {
+      if (contentLower.includes(keyword)) {
+        importance = Math.min(10, importance + 2);
+      }
+    }
+
+    // Check for learning/insight keywords (valuable for growth)
+    for (const keyword of learningKeywords) {
+      if (contentLower.includes(keyword)) {
+        importance = Math.min(10, importance + 1);
+      }
+    }
+
+    // Check for negative keywords (reduce importance)
+    for (const keyword of negativeKeywords) {
+      if (contentLower.includes(keyword)) {
+        importance = Math.max(1, importance - 2);
+      }
+    }
+
+    // Content length analysis (longer content often contains more detail)
+    if (content.length > 1000) {
+      importance = Math.min(10, importance + 1);
+    } else if (content.length > 500) {
+      importance = Math.min(10, importance + 0.5);
+    } else if (content.length < 20) {
+      importance = Math.max(1, importance - 1);
+    }
+
+    // Question analysis (questions often indicate important topics)
+    if (
+      content.includes("?") ||
+      content.includes("how") ||
+      content.includes("why") ||
+      content.includes("what")
+    ) {
+      importance = Math.min(10, importance + 1);
+    }
+
+    // Exclamation analysis (emphasis often indicates importance)
+    if (content.includes("!")) {
+      importance = Math.min(10, importance + 0.5);
+    }
+
+    // Code or technical content (often important for technical agents)
+    if (
+      content.includes("function") ||
+      content.includes("class") ||
+      content.includes("import") ||
+      content.includes("const") ||
+      content.includes("let") ||
+      content.includes("var") ||
+      content.includes("if") ||
+      content.includes("for") ||
+      content.includes("while")
+    ) {
+      importance = Math.min(10, importance + 1);
+    }
+
+    // URL or reference content (often important for research)
+    if (
+      content.includes("http") ||
+      content.includes("www.") ||
+      content.includes(".com") ||
+      content.includes(".org") ||
+      content.includes(".io")
+    ) {
+      importance = Math.min(10, importance + 1);
+    }
+
+    // Number analysis (specific data often important)
+    if (/\d+/.test(content)) {
+      importance = Math.min(10, importance + 0.5);
+    }
 
     // Ensure importance is between 1 and 10
-    return Math.max(1, Math.min(10, importance));
+    return Math.max(1, Math.min(10, Math.round(importance)));
   }
 }

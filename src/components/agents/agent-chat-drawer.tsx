@@ -32,55 +32,45 @@ export function AgentChatDrawer({
   const [isAgentResponding, setIsAgentResponding] = useState(false);
   const [thoughtSteps, setThoughtSteps] = useState<string[]>([]);
   const [showThoughts, setShowThoughts] = useState(false);
+  const [loading, setLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Load conversation when agent changes or drawer opens
   useEffect(() => {
     if (agent && open) {
+      const loadConversation = async () => {
+        setLoading(true);
+        try {
+          const agentConversation = await AgentExecution.getConversation(
+            agent.id
+          );
+          setConversation(
+            agentConversation.messages.filter((msg) => msg.role !== "system")
+          );
+        } catch (error) {
+          setConversation([]);
+        } finally {
+          setLoading(false);
+        }
+      };
       loadConversation();
     }
   }, [agent, open]);
 
   // Scroll to bottom when conversation updates
   useEffect(() => {
-    scrollToBottom();
-  }, [conversation]);
-
-  // Load conversation from agent execution
-  const loadConversation = () => {
-    if (!agent) return;
-
-    try {
-      const agentConversation = AgentExecution.getConversation(agent.id);
-      // Filter out system messages for display
-      setConversation(
-        agentConversation.messages.filter((msg) => msg.role !== "system")
-      );
-    } catch (error) {
-      console.error("Error loading conversation:", error);
-    }
-  };
-
-  // Scroll to bottom of messages
-  const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  };
+  }, [conversation]);
 
   // Send message to agent
   const handleSendMessage = async () => {
     if (!agent || !userMessage.trim() || isAgentResponding) return;
-
-    // Check if agent is active
     if (agent.status !== "active") {
-      // Start the agent if it's not active
-      AgentExecution.startAgent(agent);
+      await AgentExecution.startAgent(agent);
     }
-
     setIsAgentResponding(true);
     setThoughtSteps(["Received input", "Analyzing message..."]);
-
     try {
-      // Add message to UI immediately
       setConversation((prev) => [
         ...prev,
         {
@@ -89,24 +79,15 @@ export function AgentChatDrawer({
           timestamp: new Date().toISOString(),
         },
       ]);
-
-      // Clear input
       setUserMessage("");
-
-      // Get response from agent
       const response = await AgentExecution.sendMessage(
         agent.id,
         userMessage,
         (step) => setThoughtSteps((prev) => [...prev, step])
       );
-
-      // Add response to conversation
       setConversation((prev) => [...prev, response]);
       setThoughtSteps([]);
     } catch (error) {
-      console.error("Error sending message:", error);
-
-      // Show error in UI
       setConversation((prev) => [
         ...prev,
         {
@@ -166,66 +147,72 @@ export function AgentChatDrawer({
 
         {agent ? (
           <>
-            <ScrollArea className="flex-1 p-4">
-              <div className="flex flex-col space-y-4">
-                {(showThoughts
-                  ? AgentExecution.getConversation(agent.id).messages.filter(
-                      (msg, idx, arr) =>
-                        !(msg.role === "system" && idx === 0 && arr.length > 0)
-                    )
-                  : conversation
-                ).map((message, index) => (
-                  <div
-                    key={index}
-                    className={`flex ${
-                      message.role === "agent" ? "justify-start" : "justify-end"
-                    }`}
-                  >
+            {loading ? (
+              <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-4">
+                <Loader2 size={24} className="mb-2 animate-spin opacity-50" />
+                <p>Loading chat...</p>
+              </div>
+            ) : (
+              <ScrollArea className="flex-1 p-4">
+                <div className="flex flex-col space-y-4">
+                  {(showThoughts
+                    ? conversation
+                    : conversation.filter((msg) => msg.role !== "system")
+                  ).map((message, index) => (
                     <div
-                      className={`max-w-[70%] rounded-lg p-3 ${
+                      key={index}
+                      className={`flex ${
                         message.role === "agent"
-                          ? "bg-muted text-foreground border"
-                          : message.role === "system"
-                          ? "bg-muted text-muted-foreground text-center w-full"
-                          : "bg-primary text-primary-foreground"
+                          ? "justify-start"
+                          : "justify-end"
                       }`}
                     >
-                      <div className="flex items-center mb-1 text-xs">
-                        {message.role === "agent" ? (
-                          <>
-                            <Bot className="h-3 w-3 mr-1" />
-                            <span>{agent.config.name}</span>
-                          </>
-                        ) : message.role === "user" ? (
-                          <>
-                            <User className="h-3 w-3 mr-1" />
-                            <span>You</span>
-                          </>
-                        ) : null}
-                        <span className="ml-auto">
-                          {formatTime(message.timestamp)}
-                        </span>
-                      </div>
-                      <div className="whitespace-pre-wrap text-sm">
-                        {message.content}
+                      <div
+                        className={`max-w-[70%] rounded-lg p-3 ${
+                          message.role === "agent"
+                            ? "bg-muted text-foreground border"
+                            : message.role === "system"
+                            ? "bg-muted text-muted-foreground text-center w-full"
+                            : "bg-primary text-primary-foreground"
+                        }`}
+                      >
+                        <div className="flex items-center mb-1 text-xs">
+                          {message.role === "agent" ? (
+                            <>
+                              <Bot className="h-3 w-3 mr-1" />
+                              <span>{agent?.config.name}</span>
+                            </>
+                          ) : message.role === "user" ? (
+                            <>
+                              <User className="h-3 w-3 mr-1" />
+                              <span>You</span>
+                            </>
+                          ) : null}
+                          <span className="ml-auto">
+                            {formatTime(message.timestamp)}
+                          </span>
+                        </div>
+                        <div className="whitespace-pre-wrap text-sm">
+                          {message.content}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
-                {isAgentResponding && (
-                  <div className="flex flex-col items-start gap-2 p-3 rounded-lg bg-secondary">
-                    <Loader2 size={16} className="animate-spin" />
-                    <span>Thinking...</span>
-                    <ul className="list-disc ml-4 text-xs text-muted-foreground animate-pulse">
-                      {thoughtSteps.map((step, i) => (
-                        <li key={i}>{step}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                <div ref={messagesEndRef} />
-              </div>
-            </ScrollArea>
+                  ))}
+                  {isAgentResponding && (
+                    <div className="flex flex-col items-start gap-2 p-3 rounded-lg bg-secondary">
+                      <Loader2 size={16} className="animate-spin" />
+                      <span>Thinking...</span>
+                      <ul className="list-disc ml-4 text-xs text-muted-foreground animate-pulse">
+                        {thoughtSteps.map((step, i) => (
+                          <li key={i}>{step}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
+              </ScrollArea>
+            )}
             {/* Footer: Always show input, send button, and thoughts toggle when agent is selected */}
             <Separator />
             <div className="mt-auto p-4 pt-2 border-t">
@@ -248,11 +235,7 @@ export function AgentChatDrawer({
                   disabled={!userMessage.trim() || isAgentResponding}
                   className="h-[80px] w-[60px] flex-shrink-0"
                 >
-                  {isAgentResponding ? (
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                  ) : (
-                    <Send className="h-5 w-5" />
-                  )}
+                  <Send className="h-5 w-5" />
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground mt-2 text-center">

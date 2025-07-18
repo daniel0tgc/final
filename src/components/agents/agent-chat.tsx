@@ -37,12 +37,23 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
   const [isRunningTask, setIsRunningTask] = useState(false);
   const [thoughtSteps, setThoughtSteps] = useState<string[]>([]);
   const [showThoughts, setShowThoughts] = useState(false);
+  const [loading, setLoading] = useState(false);
 
   // Load conversation history when component mounts
   useEffect(() => {
-    const conversation = AgentExecution.getConversation(agent.id);
-    setMessages(conversation.messages.filter((m) => m.role !== "system"));
-    setIsActive(AgentExecution.isAgentActive(agent.id));
+    const loadChat = async () => {
+      setLoading(true);
+      try {
+        const conversation = await AgentExecution.getConversation(agent.id);
+        setMessages(conversation.messages.filter((m) => m.role !== "system"));
+        setIsActive(AgentExecution.isAgentActive(agent.id));
+      } catch (error) {
+        setMessages([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadChat();
   }, [agent.id]);
 
   // Scroll to bottom when messages change
@@ -52,12 +63,9 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
 
   const handleSendMessage = async () => {
     if (!inputMessage.trim() || isLoading) return;
-
-    // Ensure agent is active
     if (!isActive) {
       await handleToggleAgent();
     }
-
     setIsLoading(true);
     setThoughtSteps(["Received input", "Analyzing message..."]);
     try {
@@ -68,11 +76,7 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
         timestamp: new Date().toISOString(),
       };
       setMessages((prev) => [...prev, userMsg]);
-
-      // Clear input
       setInputMessage("");
-
-      // Simulate step: tool detection
       setThoughtSteps((prev) => [...prev, "Checking for tool calls..."]);
       // Send to agent and get response (with tool call detection)
       const response = await AgentExecution.sendMessage(
@@ -80,12 +84,9 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
         userMsg.content,
         (step) => setThoughtSteps((prev) => [...prev, step])
       );
-
-      // Update messages with agent response
       setMessages((prev) => [...prev, response]);
       setThoughtSteps([]);
     } catch (error) {
-      console.error("Error sending message:", error);
       setThoughtSteps(["Error occurred while processing."]);
     } finally {
       setIsLoading(false);
@@ -95,21 +96,17 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
   const handleToggleAgent = async () => {
     try {
       if (isActive) {
-        // Stop agent
         const updatedAgent = await AgentExecution.stopAgent(agent);
         setIsActive(false);
         if (onStatusChange) {
           onStatusChange(agent.id, updatedAgent.status);
         }
       } else {
-        // Start agent
         const updatedAgent = await AgentExecution.startAgent(agent);
         setIsActive(true);
         if (onStatusChange) {
           onStatusChange(agent.id, updatedAgent.status);
         }
-
-        // Add system message if first time starting
         if (messages.length === 0) {
           setMessages([
             {
@@ -120,9 +117,7 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
           ]);
         }
       }
-    } catch (error) {
-      console.error("Error toggling agent:", error);
-    }
+    } catch (error) {}
   };
 
   const handleRunTask = async () => {
@@ -203,48 +198,60 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
       <CardContent className="p-4 flex-grow overflow-hidden">
         <ScrollArea className="h-full pr-4">
           <div className="flex flex-col space-y-4">
-            <div className="flex justify-end">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setShowThoughts((v) => !v)}
-              >
-                {showThoughts ? "Hide Thoughts" : "Show Thoughts"}
-              </Button>
-            </div>
-            {messages
-              .filter((m) => showThoughts || m.role !== "system")
-              .map((message, index) => (
-                <div
-                  key={index}
-                  className={`flex ${
-                    message.role === "user" ? "justify-end" : "justify-start"
-                  }`}
-                >
-                  <div
-                    className={`p-3 rounded-lg max-w-[80%] ${
-                      message.role === "user"
-                        ? "bg-primary text-primary-foreground"
-                        : message.role === "system"
-                        ? "bg-muted text-muted-foreground text-center w-full"
-                        : "bg-secondary"
-                    }`}
+            {loading ? (
+              <div className="flex flex-col items-center justify-center h-full text-muted-foreground p-4">
+                <Loader size={24} className="mb-2 animate-spin opacity-50" />
+                <p>Loading chat...</p>
+              </div>
+            ) : (
+              <>
+                <div className="flex justify-end">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setShowThoughts((v) => !v)}
                   >
-                    <div className="flex items-center gap-2 mb-1">
-                      {message.role === "user" ? (
-                        <User size={14} />
-                      ) : message.role === "agent" ? (
-                        <Bot size={14} />
-                      ) : null}
-                      <span className="text-xs opacity-70">
-                        {formatTime(message.timestamp)}
-                      </span>
-                    </div>
-                    <div className="whitespace-pre-wrap">{message.content}</div>
-                  </div>
+                    {showThoughts ? "Hide Thoughts" : "Show Thoughts"}
+                  </Button>
                 </div>
-              ))}
-
+                {messages
+                  .filter((m) => showThoughts || m.role !== "system")
+                  .map((message, index) => (
+                    <div
+                      key={index}
+                      className={`flex ${
+                        message.role === "user"
+                          ? "justify-end"
+                          : "justify-start"
+                      }`}
+                    >
+                      <div
+                        className={`p-3 rounded-lg max-w-[80%] ${
+                          message.role === "user"
+                            ? "bg-primary text-primary-foreground"
+                            : message.role === "system"
+                            ? "bg-muted text-muted-foreground text-center w-full"
+                            : "bg-secondary"
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 mb-1">
+                          {message.role === "user" ? (
+                            <User size={14} />
+                          ) : message.role === "agent" ? (
+                            <Bot size={14} />
+                          ) : null}
+                          <span className="text-xs opacity-70">
+                            {formatTime(message.timestamp)}
+                          </span>
+                        </div>
+                        <div className="whitespace-pre-wrap">
+                          {message.content}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+              </>
+            )}
             {isLoading && (
               <div className="flex flex-col items-start gap-2 p-3 rounded-lg bg-secondary">
                 <Loader size={16} className="animate-spin" />
@@ -256,7 +263,6 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
                 </ul>
               </div>
             )}
-
             <div ref={messagesEndRef} />
           </div>
         </ScrollArea>

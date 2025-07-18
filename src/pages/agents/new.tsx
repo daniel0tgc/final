@@ -143,15 +143,14 @@ export default function NewAgentPage() {
         }
       }
 
-      // Save agent to localStorage
-      const storedAgents = localStorage.getItem("agents");
-      const agents = storedAgents ? JSON.parse(storedAgents) : [];
-      agents.push(newAgent);
-      localStorage.setItem("agents", JSON.stringify(agents));
-
+      // Save agent to backend
+      await fetch("/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(newAgent),
+      });
       // Initialize agent in execution engine
-      AgentExecution.startAgent(newAgent);
-
+      await AgentExecution.startAgent(newAgent);
       // Navigate to agent details page
       setTimeout(() => {
         navigate(`/agents/details/${agentId}`);

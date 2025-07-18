@@ -1,0 +1,10 @@
+{
+  "name": "agent-node",
+  "version": "1.0.0",
+  "main": "agent.js",
+  "type": "module",
+  "dependencies": {
+    "express": "^4.18.2",
+    "redis": "^4.6.7"
+  }
+}

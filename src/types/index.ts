@@ -42,6 +42,9 @@ export interface MCPServer {
     maxAgents: number;
   };
   features?: string[];
+  tools?: any[];
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 // Stats/Dashboard

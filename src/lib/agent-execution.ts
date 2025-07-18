@@ -6,6 +6,7 @@ import { A2ACommunication } from "./a2a-communication";
 // Remove fs and path imports
 // Import agent_context.txt as a raw string
 import agentContext from "@/components/agents/agent_context.txt?raw";
+import { agentToolRegistry, ToolCall, ToolResult } from "./agent-tools";
 
 // Agent Execution types
 export interface AgentMessage {
@@ -22,80 +23,72 @@ export interface AgentConversation {
 
 // Remove getAgentBaseContext function
 
-export class AgentExecution {
-  private static conversations: Map<string, AgentConversation> = new Map();
-  private static activeAgents: Set<string> = new Set();
-  private static initialized = false;
+const API_BASE = "/api";
 
+export class AgentExecution {
   /**
    * Public method to initialize the agent execution system
    */
   static init(): void {
-    if (!this.initialized) {
-      this.initialize();
-      this.initialized = true;
-    }
+    // No longer needed, initialization is handled by backend
   }
 
   /**
    * Start an agent - activate it for execution
    */
-  static startAgent(agent: Agent): Agent {
+  static async startAgent(agent: Agent): Promise<Agent> {
     try {
-      // Add to active agents
-      this.activeAgents.add(agent.id);
-
-      // Prepare system prompt: prepend agent_context, then dynamic tool list, then user systemPrompt
-      let toolList = "";
-      if (agent.config.tools && agent.config.tools.length > 0) {
-        toolList =
-          "\n\nAVAILABLE TOOLS FOR THIS AGENT:\n" +
-          agent.config.tools
-            .map(
-              (tool: any) =>
-                `- ${tool.name || tool.id}: ${tool.description || ""}`
-            )
-            .join("\n");
+      // Start the agent container via backend
+      const resp = await fetch("/api/agents/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agent }),
+      });
+      if (!resp.ok) {
+        throw new Error("Failed to start agent container");
       }
-      const baseContext = agentContext;
-      const fullSystemPrompt = `${baseContext}${toolList}\n\n${agent.config.systemPrompt}`;
 
-      // Initialize conversation if needed
-      if (!this.conversations.has(agent.id)) {
-        this.conversations.set(agent.id, {
-          agentId: agent.id,
-          messages: [
-            {
-              role: "system",
-              content: fullSystemPrompt,
-              timestamp: new Date().toISOString(),
-            },
-          ],
-          lastActive: new Date().toISOString(),
+      // --- Inject agent context as first memory (if not already present) ---
+      // Prepare context: replace template vars and append user context
+      let context = agentContext
+        .replace(/\{\{AGENT_ID\}\}/g, agent.id)
+        .replace(/\{\{PRIMARY_ROLE\}\}/g, agent.config.type || "agent")
+        .replace(/\{\{MISSION_STATEMENT\}\}/g, agent.config.description || "");
+      if (agent.config.contextData) {
+        context = context + "\n\nUSER CONTEXT:\n" + agent.config.contextData;
+      }
+      // Store in long-term memory as 'base_context'
+      await AgentMemory.setFact(agent.id, "base_context", context);
+      // Also add as system memory if not present
+      const existingMemories = await AgentMemory.getMemories(agent.id);
+      const hasSystemContext = existingMemories.some(
+        (m) =>
+          m.type === "system" &&
+          m.content.includes("You are an autonomous AI agent")
+      );
+      if (!hasSystemContext) {
+        await AgentMemory.addMemory(agent.id, {
+          type: "system",
+          content: context,
+          importance: 10,
         });
-
-        // Persist conversations to localStorage
-        this.saveConversations();
       }
+      // --- End context injection ---
 
-      // Update active agents in localStorage
-      this.saveActiveAgents();
-
-      // Log agent start to memory
-      AgentMemory.addMemory(agent.id, {
+      // Log agent activation in memory
+      await AgentMemory.addMemory(agent.id, {
         type: "observation",
         content: `Agent activated`,
         importance: 5,
       });
-
-      // After agent is started (in startAgent), embed agent profile in shared vector DB
       SharedVectorDB.embedAgentProfile(agent);
-
-      // Return updated agent
-      const updatedAgent = { ...agent, status: "active" as const };
-      this.updateAgentInStorage(updatedAgent);
-
-      return updatedAgent;
+      // Initialize A2A memory in long-term storage (PostgreSQL)
+      // Only set if not already present
+      const existingA2A = await AgentMemory.getFact(agent.id, "a2a:messages");
+      if (existingA2A === null) {
+        await AgentMemory.setFact(agent.id, "a2a:messages", JSON.stringify([]));
+      }
+      return { ...agent, status: "active" as const };
     } catch (error) {
       console.error("Error starting agent:", error);
       throw error;
@@ -105,29 +98,15 @@ export class AgentExecution {
   /**
    * Stop an agent - deactivate it
    */
-  static stopAgent(agentId: string): Agent {
+  static async stopAgent(agent: Agent): Promise<Agent> {
     try {
       // Remove from active agents
-      this.activeAgents.delete(agentId);
-
-      // Update active agents in localStorage
-      this.saveActiveAgents();
-
-      // Log agent stop to memory
-      AgentMemory.addMemory(agentId, {
+      AgentMemory.addMemory(agent.id, {
         type: "observation",
         content: `Agent deactivated`,
         importance: 5,
       });
-
-      // Get and update agent
-      const agent = this.getAgentDetails(agentId);
-      if (!agent) throw new Error("Agent not found");
-
-      const updatedAgent = { ...agent, status: "stopped" as const };
-      this.updateAgentInStorage(updatedAgent);
-
-      return updatedAgent;
+      return { ...agent, status: "stopped" as const };
     } catch (error) {
       console.error("Error stopping agent:", error);
       throw error;
@@ -135,14 +114,22 @@ export class AgentExecution {
   }
 
   /**
-   * Check if an agent is active
+   * Check if an agent is active (now checks backend)
    */
-  static isAgentActive(agentId: string): boolean {
-    return this.activeAgents.has(agentId);
+  static async isAgentActive(agentId: string): Promise<boolean> {
+    try {
+      const res = await fetch(`/api/agents/${agentId}`);
+      if (!res.ok) return false;
+      const agent: Agent = await res.json();
+      return agent.status === "active";
+    } catch (error) {
+      console.error("Error checking agent status:", error);
+      return false;
+    }
   }
 
   /**
-   * Send a message to an agent and get response
+   * Send a message to an agent and get a response (uses AI service and real context)
    */
   static async sendMessage(
     agentId: string,
@@ -150,155 +137,113 @@ export class AgentExecution {
     onThoughtStep?: (step: string) => void
   ): Promise<AgentMessage> {
     try {
-      if (onThoughtStep) onThoughtStep("Input received");
-      // Get agent conversation
-      const conversation = this.getConversation(agentId);
-      if (!conversation) {
-        throw new Error("Agent conversation not found");
-      }
+      // Get agent details
+      const agentRes = await fetch(`/api/agents/${agentId}`);
+      if (!agentRes.ok) throw new Error("Agent not found");
+      const agent: Agent = await agentRes.json();
+
+      // Get full conversation for context and chat history
+      const conversation = await this.getConversation(agentId);
+      const chatHistory = conversation.messages || [];
+      const recentMessages = chatHistory.slice(-10);
 
       // Create user message
-      const userMessage: AgentMessage = {
+      const userMsg: AgentMessage = {
         role: "user",
         content: message,
         timestamp: new Date().toISOString(),
       };
-
-      // Add to conversation
-      conversation.messages.push(userMessage);
-      conversation.lastActive = userMessage.timestamp;
-
-      // Add to agent memory
-      AgentMemory.addMemory(agentId, {
+      // Append user message to chat history
+      const updatedChat = [...chatHistory, userMsg];
+      // Save updated chat array to backend
+      await fetch(`/api/memory/set`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: `agent:${agentId}:chat`,
+          value: updatedChat,
+        }),
+      });
+      // Also add to short-term memory
+      await AgentMemory.addMemory(agentId, {
         type: "user_message",
         content: message,
-        importance: AgentMemory.assessImportance(message, "user_message"),
+        importance: 5,
       });
 
-      // In a real implementation, this would call the AI service
-      // Here we'll simulate a response after a delay
+      if (onThoughtStep) onThoughtStep("Retrieving context and reasoning...");
 
-      // Get agent info for the response (agent name, type, etc.)
-      const agent = this.getAgentDetails(agentId);
-      if (onThoughtStep) onThoughtStep("Generating agent response...");
+      // Generate agent response using AI service and real context
+      let agentResponseContent = await this.generateAgentResponse(
+        agent,
+        message,
+        recentMessages
+      );
 
-      // Generate response based on agent type and message
-      let response = await this.generateAgentResponse(agent, message);
-
-      // Tool call detection and execution loop
-      let toolCall = parseToolCall(response);
-      let toolResult: string | null = null;
-      let toolMessages: AgentMessage[] = [];
-      while (toolCall) {
-        if (onThoughtStep)
-          onThoughtStep(`Detected tool call: ${toolCall.tool_call}`);
-        // Execute the tool
-        if (toolCall.tool_call === "LIST_AGENTS") {
-          if (onThoughtStep) onThoughtStep("Executing LIST_AGENTS tool...");
-          const storedAgents = localStorage.getItem("agents");
-          let agentList = [];
-          if (storedAgents) {
-            agentList = JSON.parse(storedAgents).map(
-              (a: any) => `- ${a.config.name} (ID: ${a.id})`
-            );
-          }
-          toolResult = `Available agents:\n${agentList.join("\n")}`;
-          if (onThoughtStep) onThoughtStep("Tool result received: LIST_AGENTS");
-        } else if (toolCall.tool_call === "SEND") {
-          const { to_id, message: msg } = toolCall.args || {};
-          if (to_id && msg) {
-            if (onThoughtStep) onThoughtStep("Executing SEND tool...");
-            // Find agent name
-            const storedAgents = localStorage.getItem("agents");
-            let toName = to_id;
-            if (storedAgents) {
-              const found = JSON.parse(storedAgents).find(
-                (a: any) => a.id === to_id
-              );
-              if (found) toName = found.config.name;
-            }
-            await (
-              await import("./a2a-communication")
-            ).A2ACommunication.sendMessage(
-              agentId,
-              agent?.config?.name || agentId,
-              to_id,
-              toName,
-              msg
-            );
-            toolResult = `Message sent to ${toName}.`;
-            if (onThoughtStep) onThoughtStep("Tool result received: SEND");
-          } else {
-            toolResult = "SEND tool requires to_id and message.";
-          }
-        } else if (toolCall.tool_call === "READ_MEMORY") {
-          const { key } = toolCall.args || {};
-          if (key) {
-            if (onThoughtStep) onThoughtStep("Executing READ_MEMORY tool...");
-            const value = (
-              await import("./shared-vector-db")
-            ).SharedVectorDB.query(key);
-            toolResult = `Memory for key '${key}': ${JSON.stringify(value)}`;
-            if (onThoughtStep)
-              onThoughtStep("Tool result received: READ_MEMORY");
-          } else {
-            toolResult = "READ_MEMORY tool requires key.";
-          }
-        } else if (toolCall.tool_call === "WRITE_MEMORY") {
-          const { key, value } = toolCall.args || {};
-          if (key && value !== undefined) {
-            if (onThoughtStep) onThoughtStep("Executing WRITE_MEMORY tool...");
-            (
-              await import("./shared-vector-db")
-            ).SharedVectorDB.embedAgentAction(agentId, key, value);
-            toolResult = `Wrote value to memory key '${key}'.`;
-            if (onThoughtStep)
-              onThoughtStep("Tool result received: WRITE_MEMORY");
-          } else {
-            toolResult = "WRITE_MEMORY tool requires key and value.";
-          }
-        } else {
-          toolResult = `Unknown tool: ${toolCall.tool_call}`;
+      // Tool call detection (expects JSON with tool_call)
+      let toolCall: ToolCall | null = null;
+      try {
+        const parsed = JSON.parse(agentResponseContent);
+        if (parsed && typeof parsed === "object" && parsed.tool_call) {
+          toolCall = parsed as ToolCall;
         }
-        // Inject tool result as a system message
-        const toolMsg: AgentMessage = {
+      } catch {}
+
+      // If tool call detected, handle it and re-prompt LLM with tool result
+      if (toolCall && agentToolRegistry[toolCall.tool_call]) {
+        if (onThoughtStep) onThoughtStep(`Calling tool: ${toolCall.tool_call}`);
+        const toolResult: ToolResult = await agentToolRegistry[
+          toolCall.tool_call
+        ](toolCall.args || {}, { agent });
+        // Inject tool result as a system message and re-prompt LLM
+        const toolResultMsg: AgentMessage = {
           role: "system",
-          content: toolResult,
+          content: JSON.stringify(toolResult),
           timestamp: new Date().toISOString(),
         };
-        toolMessages.push(toolMsg);
-        // Add to conversation
-        conversation.messages.push(toolMsg);
-        conversation.lastActive = toolMsg.timestamp;
-        // Save updated conversation
-        this.saveConversations();
-        if (onThoughtStep)
-          onThoughtStep("Re-prompting agent with tool result...");
-        // Re-prompt agent with tool result
-        response = await this.generateAgentResponse(agent, toolResult);
-        toolCall = parseToolCall(response);
+        const newContext: AgentMessage[] = [
+          ...recentMessages,
+          userMsg,
+          toolResultMsg,
+        ];
+        agentResponseContent = await this.generateAgentResponse(
+          agent,
+          message,
+          newContext
+        );
       }
-      // Create agent message (final response)
+
+      // Create agent response message
       const agentMessage: AgentMessage = {
         role: "agent",
-        content: response,
+        content: agentResponseContent,
         timestamp: new Date().toISOString(),
       };
-      // Add to conversation
-      conversation.messages.push(agentMessage);
-      conversation.lastActive = agentMessage.timestamp;
-      // Add to agent memory
-      AgentMemory.addMemory(agentId, {
-        type: "agent_response",
-        content: response,
-        importance: AgentMemory.assessImportance(response, "agent_response"),
+      // Append agent response to chat history
+      const finalChat = [...updatedChat, agentMessage];
+      // Save updated chat array to backend
+      await fetch(`/api/memory/set`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: `agent:${agentId}:chat`,
+          value: finalChat,
+        }),
       });
-      // Save updated conversation
-      this.saveConversations();
+      // Also add to short-term memory
+      await AgentMemory.addMemory(agentId, {
+        type: "agent_response",
+        content: agentResponseContent,
+        importance: 6,
+      });
+
       return agentMessage;
     } catch (error) {
       console.error("Error sending message to agent:", error);
-      if (onThoughtStep) onThoughtStep("Error: " + error.message);
+      if (onThoughtStep)
+        onThoughtStep(
+          "Error: " + (error instanceof Error ? error.message : error)
+        );
       throw error;
     }
   }
@@ -309,8 +254,8 @@ export class AgentExecution {
   static async runAutonomousTask(agent: Agent, task: string): Promise<string> {
     try {
       // Check if agent is active
-      if (!this.isAgentActive(agent.id)) {
-        this.startAgent(agent);
+      if (!(await this.isAgentActive(agent.id))) {
+        await this.startAgent(agent);
       }
 
       // Add task to agent memory
@@ -323,11 +268,16 @@ export class AgentExecution {
         },
       });
 
-      // Simulate processing time (would be AI service call in real implementation)
-      await new Promise((resolve) => setTimeout(resolve, 2000));
+      // Get recent conversation for context
+      const conversation = await this.getConversation(agent.id);
+      const recentMessages = conversation.messages.slice(-10);
 
-      // Generate response based on agent type and task
-      const response = this.generateAutonomousResponse(task, agent);
+      // Generate response using AI service and real context
+      const agentRes = await this.generateAgentResponse(
+        agent,
+        task,
+        recentMessages
+      );
 
       // Add result to agent memory
       AgentMemory.addMemory(agent.id, {
@@ -336,14 +286,14 @@ export class AgentExecution {
         importance: 7,
         metadata: {
           taskType: "autonomous",
-          result: response,
+          result: agentRes,
         },
       });
 
       // After autonomous task is completed (in runAutonomousTask), embed task result in shared vector DB
-      SharedVectorDB.embedAgentAction(agent.id, task, response);
+      SharedVectorDB.embedAgentAction(agent.id, task, agentRes);
 
-      return response;
+      return agentRes;
     } catch (error) {
       console.error("Error running autonomous task:", error);
       throw new Error(
@@ -355,153 +305,15 @@ export class AgentExecution {
   }
 
   /**
-   * Generate a response for autonomous task
-   */
-  private static generateAutonomousResponse(
-    task: string,
-    agent: Agent
-  ): string {
-    const taskLower = task.toLowerCase();
-    const agentType = agent.config.type;
-
-    // Generate different responses based on task and agent type
-    if (taskLower.includes("analyze") || taskLower.includes("review")) {
-      return (
-        `Task Analysis Complete: "${task}"\n\n` +
-        `I've analyzed the request and identified the following key elements:\n\n` +
-        `1. Primary objective: ${this.extractObjective(task)}\n` +
-        `2. Key constraints: Time, resources, and data availability\n` +
-        `3. Success criteria: Accuracy, completeness, and actionability\n\n` +
-        `Based on my analysis, I recommend proceeding with a phased approach, starting with data gathering, then analysis, and finally presenting recommendations.\n\n` +
-        `Would you like me to begin implementation or refine the approach?`
-      );
-    }
-
-    if (taskLower.includes("research") || taskLower.includes("find")) {
-      return (
-        `Research Task Complete: "${task}"\n\n` +
-        `After thorough investigation, I've gathered the following information:\n\n` +
-        `• The topic shows significant development in recent years\n` +
-        `• Key trends include increased automation, AI integration, and improved efficiency\n` +
-        `• Several challenges remain, particularly regarding standardization and interoperability\n\n` +
-        `The most promising avenues for further exploration are in the areas of:\n` +
-        `1. Adaptive systems that respond to changing environments\n` +
-        `2. Integrated platforms that combine multiple functionalities\n` +
-        `3. User-centric designs that prioritize accessibility and ease of use\n\n` +
-        `Would you like me to focus on any specific aspect for a deeper analysis?`
-      );
-    }
-
-    if (
-      taskLower.includes("plan") ||
-      taskLower.includes("schedule") ||
-      taskLower.includes("organize")
-    ) {
-      return (
-        `Planning Task Complete: "${task}"\n\n` +
-        `I've developed a comprehensive plan with the following components:\n\n` +
-        `PHASE 1: Preparation (Days 1-3)\n` +
-        `• Resource assessment and allocation\n` +
-        `• Stakeholder identification and communication\n` +
-        `• Initial risk assessment\n\n` +
-        `PHASE 2: Implementation (Days 4-10)\n` +
-        `• Core components development\n` +
-        `• Integration testing\n` +
-        `• Preliminary quality assurance\n\n` +
-        `PHASE 3: Refinement (Days 11-14)\n` +
-        `• User feedback incorporation\n` +
-        `• Performance optimization\n` +
-        `• Final documentation\n\n` +
-        `The plan includes contingency measures for common obstacles and a flexible timeline that can be adjusted as needed.\n\n` +
-        `Would you like me to proceed with implementation or adjust any aspects of this plan?`
-      );
-    }
-
-    if (taskLower.includes("summarize") || taskLower.includes("summary")) {
-      return (
-        `Summary Task Complete: "${task}"\n\n` +
-        `Key points:\n\n` +
-        `1. The subject demonstrates significant complexity with multiple interdependent factors\n` +
-        `2. Recent developments have shifted priorities toward sustainable and scalable solutions\n` +
-        `3. Current challenges primarily revolve around integration with existing systems\n` +
-        `4. Future directions point toward more automated, intelligence-driven approaches\n\n` +
-        `This summary focuses on actionable insights and strategic implications rather than tactical details. The most critical takeaway is the need for adaptable frameworks that can evolve with changing requirements.\n\n` +
-        `Would you like me to elaborate on any specific aspect of this summary?`
-      );
-    }
-
-    if (agentType === "conversational") {
-      return (
-        `I've completed your requested task: "${task}"\n\n` +
-        `I approached this by considering multiple perspectives and focusing on the most relevant aspects. The results indicate that there are several viable approaches, each with their own strengths.\n\n` +
-        `My analysis suggests that an iterative process would be most effective, allowing for continuous refinement based on feedback and results.\n\n` +
-        `Would you like me to proceed with implementation or would you prefer to discuss alternative approaches?`
-      );
-    }
-
-    if (agentType === "analytical") {
-      return (
-        `Analysis Complete: "${task}"\n\n` +
-        `I've examined the available data and identified the following patterns:\n\n` +
-        `• Pattern A: Shows strong correlation with external factors\n` +
-        `• Pattern B: Demonstrates cyclical behavior with predictable intervals\n` +
-        `• Pattern C: Reveals anomalies that warrant further investigation\n\n` +
-        `Statistical significance: High (p < 0.05)\n` +
-        `Confidence interval: 95%\n` +
-        `Margin of error: ±3.2%\n\n` +
-        `This analysis suggests that the observed phenomena are not random and can be modeled with reasonable accuracy. Further data would help refine these conclusions.\n\n` +
-        `Would you like me to perform additional analysis on any specific aspect?`
-      );
-    }
-
-    // Default response for other task types
-    return (
-      `Task Complete: "${task}"\n\n` +
-      `I've successfully executed the requested task and compiled the results. The process involved multiple stages of analysis and execution.\n\n` +
-      `Key outcomes:\n\n` +
-      `1. Primary objectives were achieved within the specified parameters\n` +
-      `2. Several optimization opportunities were identified during execution\n` +
-      `3. The results provide a solid foundation for further development\n\n` +
-      `Next steps could include refining the approach based on these initial results, exploring alternative methodologies, or scaling the solution to address broader challenges.\n\n` +
-      `Would you like me to elaborate on any specific aspect of the results?`
-    );
-  }
-
-  /**
-   * Extract the main objective from a task description (simple version)
-   */
-  private static extractObjective(task: string): string {
-    const taskLower = task.toLowerCase();
-
-    // Extract objective based on common patterns (simple implementation)
-    if (taskLower.includes("analyze")) return "Conduct comprehensive analysis";
-    if (taskLower.includes("research"))
-      return "Gather and synthesize information";
-    if (taskLower.includes("plan")) return "Develop structured approach";
-    if (taskLower.includes("summarize"))
-      return "Extract and present key information";
-    if (taskLower.includes("find"))
-      return "Locate specific information or resources";
-    if (taskLower.includes("create"))
-      return "Generate new content or solutions";
-
-    // Default objective extraction
-    const words = task.split(" ");
-    if (words.length > 5) {
-      return `${words[0]} ${words[1]} ${words[2]}...`; // First few words
-    }
-    return task; // Use full task if it's short
-  }
-
-  /**
-   * Generate a response based on agent type and message
+   * Generate a response using AI service and real conversation context
    */
   private static async generateAgentResponse(
     agent: Agent | null,
-    message: string
+    message: string,
+    contextMessages: AgentMessage[] = []
   ): Promise<string> {
     if (!agent) {
-      return "I'm sorry, I can't process your request at the moment.";
+      throw new Error("Agent not found or unavailable.");
     }
 
     try {
@@ -510,37 +322,33 @@ export class AgentExecution {
 
       // Check if API keys are configured
       if (!AIService.hasValidApiKeys()) {
-        console.log("No valid API keys found, using mock response");
-        // Fallback to mock response if no API keys
-        return this.generateMockResponse(agent, message);
+        throw new Error("No valid API keys found for AI service.");
       }
 
-      console.log("Using real AI service for response generation");
-
-      // Get conversation history for context
-      const conversation = this.getConversation(agent.id);
-      const recentMessages = conversation.messages.slice(-10); // Last 10 messages for context
-
-      // Convert to AI service format
-      const aiMessages = recentMessages.map((msg) => {
-        const convertedRole =
-          msg.role === "agent"
-            ? "assistant"
-            : (msg.role as "system" | "user" | "assistant");
-        console.log(`Converting message role: ${msg.role} -> ${convertedRole}`);
-        return {
-          role: convertedRole,
-          content: msg.content,
-        };
-      });
-
+      // Retrieve base context from long-term memory
+      const baseContext = await AgentMemory.getFact(agent.id, "base_context");
+      const aiMessages = [];
+      if (baseContext) {
+        aiMessages.push({ role: "system", content: baseContext });
+      }
+      // Add previous messages
+      aiMessages.push(
+        ...contextMessages.map((msg) => {
+          const convertedRole =
+            msg.role === "agent"
+              ? "assistant"
+              : (msg.role as "system" | "user" | "assistant");
+          return {
+            role: convertedRole,
+            content: msg.content,
+          };
+        })
+      );
       // Add the current user message
       aiMessages.push({
         role: "user",
         content: message,
       });
-
-      console.log("Sending messages to AI service:", aiMessages);
 
       // Generate response using AI service
       const response = await AIService.generateResponse(
@@ -555,207 +363,48 @@ export class AgentExecution {
       return response.content;
     } catch (error) {
       console.error("Error generating AI response:", error);
-
-      // Fallback to mock response if AI service fails
-      return this.generateMockResponse(agent, message);
+      throw new Error(
+        `Failed to generate agent response: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`
+      );
     }
   }
 
   /**
-   * Generate a mock response (fallback when AI service is unavailable)
+   * Get details for an agent (async)
    */
-  private static generateMockResponse(agent: Agent, message: string): string {
-    const agentType = agent.config.type;
-    const messageLower = message.toLowerCase();
-
-    // Generate appropriate responses based on agent type
-    if (agentType === "conversational") {
-      if (messageLower.includes("hello") || messageLower.includes("hi")) {
-        return `Hello! I'm ${agent.config.name}, a conversational AI agent. How can I assist you today?`;
-      }
-
-      if (
-        messageLower.includes("help") ||
-        messageLower.includes("what can you do")
-      ) {
-        return `I'm ${agent.config.name}, and I'm designed to have helpful conversations. I can answer questions, provide information, or just chat. What would you like to talk about?`;
-      }
-
-      return `Thanks for your message. As a conversational agent, I'm here to help with your questions and provide useful information. Based on what you've shared, I think we could explore this topic further. Would you like me to elaborate on any specific aspect?`;
-    }
-
-    if (agentType === "analytical") {
-      return (
-        `I've analyzed your query: "${message}"\n\n` +
-        `From an analytical perspective, this presents several interesting dimensions to explore:\n\n` +
-        `1. Primary factors: Context, implications, and underlying assumptions\n` +
-        `2. Secondary considerations: Trade-offs, alternatives, and constraints\n` +
-        `3. Relevant metrics: Efficiency, accuracy, and scalability\n\n` +
-        `Based on initial assessment, I recommend focusing on the most critical aspects first to establish a solid foundation for further analysis. Would you like me to proceed with a deeper examination of any particular element?`
-      );
-    }
-
-    if (agentType === "creative") {
-      return (
-        `Thanks for the creative prompt! I've been thinking about "${message}" and have some interesting ideas:\n\n` +
-        `• What if we approached this from an unconventional angle by inverting our usual thinking?\n` +
-        `• There's potential to blend multiple concepts here - combining elements from different domains\n` +
-        `• A promising direction might be to explore the tensions between opposing aspects\n\n` +
-        `I'm particularly drawn to the possibilities that emerge when we challenge our initial assumptions. Would you like me to develop any of these creative directions further?`
-      );
-    }
-
-    // Default response for other agent types
-    return `Thank you for your message. I'm ${agent.config.name}, an AI agent designed to assist with various tasks. I've processed your request and am ready to help. Could you provide more details about what you're looking for so I can better assist you?`;
-  }
-
-  /**
-   * Get details for an agent
-   */
-  private static getAgentDetails(agentId: string): Agent | null {
+  private static async getAgentDetails(agentId: string): Promise<Agent | null> {
     try {
-      const storedAgents = localStorage.getItem("agents");
-      if (storedAgents) {
-        const agents = JSON.parse(storedAgents);
-        const agent = agents.find((a: Agent) => a.id === agentId);
-        return agent || null;
-      }
+      const res = await fetch(`${API_BASE}/agents/${agentId}`);
+      if (!res.ok) return null;
+      const agent: Agent = await res.json();
+      return agent;
     } catch (error) {
       console.error("Error getting agent details:", error);
     }
-
     return null;
   }
 
   /**
-   * Get conversation for an agent
+   * Get conversation for an agent (from backend)
    */
-  static getConversation(agentId: string): AgentConversation {
-    // Check if in memory
-    if (this.conversations.has(agentId)) {
-      return this.conversations.get(agentId)!;
-    }
-
-    // Try to load from localStorage
-    try {
-      const storedConversations = localStorage.getItem("agent_conversations");
-      if (storedConversations) {
-        const conversations = JSON.parse(storedConversations);
-
-        if (conversations[agentId]) {
-          // Found in localStorage, add to memory
-          this.conversations.set(agentId, conversations[agentId]);
-          return conversations[agentId];
-        }
-      }
-    } catch (error) {
-      console.error("Error loading conversation from localStorage:", error);
-    }
-
-    // Not found, create a new conversation
-    const newConversation: AgentConversation = {
+  static async getConversation(agentId: string): Promise<AgentConversation> {
+    const res = await fetch(`${API_BASE}/memory/get/agent:${agentId}:chat`);
+    const data = await res.json();
+    const messages: AgentMessage[] = Array.isArray(data.value)
+      ? data.value
+      : data.value
+      ? [data.value]
+      : [];
+    return {
       agentId,
-      messages: [],
-      lastActive: new Date().toISOString(),
+      messages,
+      lastActive:
+        messages.length > 0
+          ? messages[messages.length - 1].timestamp
+          : new Date().toISOString(),
     };
-
-    this.conversations.set(agentId, newConversation);
-    this.saveConversations();
-
-    return newConversation;
-  }
-
-  /**
-   * Save all conversations to localStorage
-   */
-  private static saveConversations(): void {
-    try {
-      // Convert Map to Object for storage
-      const conversationsObj: Record<string, AgentConversation> = {};
-      for (const [agentId, conversation] of this.conversations.entries()) {
-        conversationsObj[agentId] = conversation;
-      }
-
-      localStorage.setItem(
-        "agent_conversations",
-        JSON.stringify(conversationsObj)
-      );
-    } catch (error) {
-      console.error("Error saving conversations to localStorage:", error);
-    }
-  }
-
-  /**
-   * Save active agents to localStorage
-   */
-  private static saveActiveAgents(): void {
-    try {
-      localStorage.setItem(
-        "active_agents",
-        JSON.stringify([...this.activeAgents])
-      );
-    } catch (error) {
-      console.error("Error saving active agents to localStorage:", error);
-    }
-  }
-
-  /**
-   * Update agent in storage
-   */
-  private static updateAgentInStorage(agent: Agent): void {
-    try {
-      const storedAgents = localStorage.getItem("agents");
-      if (storedAgents) {
-        const agents = JSON.parse(storedAgents);
-        const updatedAgents = agents.map((a: Agent) =>
-          a.id === agent.id ? agent : a
-        );
-        localStorage.setItem("agents", JSON.stringify(updatedAgents));
-      }
-    } catch (error) {
-      console.error("Error updating agent in storage:", error);
-    }
-  }
-
-  /**
-   * Load all conversations from localStorage
-   */
-  static loadConversations(): void {
-    try {
-      const storedConversations = localStorage.getItem("agent_conversations");
-      if (storedConversations) {
-        const conversations = JSON.parse(storedConversations);
-
-        for (const agentId in conversations) {
-          this.conversations.set(agentId, conversations[agentId]);
-        }
-      }
-    } catch (error) {
-      console.error("Error loading conversations from localStorage:", error);
-    }
-  }
-
-  /**
-   * Load active agents from localStorage
-   */
-  static loadActiveAgents(): void {
-    try {
-      const storedActiveAgents = localStorage.getItem("active_agents");
-      if (storedActiveAgents) {
-        const activeAgents = JSON.parse(storedActiveAgents);
-        this.activeAgents = new Set(activeAgents);
-      }
-    } catch (error) {
-      console.error("Error loading active agents from localStorage:", error);
-    }
-  }
-
-  /**
-   * Initialize the agent execution engine
-   */
-  static initialize(): void {
-    this.loadConversations();
-    this.loadActiveAgents();
   }
 
   /**
@@ -768,8 +417,8 @@ export class AgentExecution {
     metadata?: Record<string, any>
   ) {
     // Get agent details for names
-    const sourceAgent = this.getAgentDetails(sourceAgentId);
-    const targetAgent = this.getAgentDetails(targetAgentId);
+    const sourceAgent = await this.getAgentDetails(sourceAgentId);
+    const targetAgent = await this.getAgentDetails(targetAgentId);
     if (!sourceAgent || !targetAgent) throw new Error("Agent not found");
     return await A2ACommunication.sendMessage(
       sourceAgentId,
@@ -780,19 +429,52 @@ export class AgentExecution {
       metadata
     );
   }
-}
 
-// Helper: Check if a string is a tool call JSON
-function parseToolCall(
-  response: string
-): { tool_call: string; args: any } | null {
-  try {
-    const obj = JSON.parse(response);
-    if (obj && typeof obj === "object" && obj.tool_call) {
-      return obj;
-    }
-  } catch (e) {}
-  return null;
-}
+  /**
+   * At the end of a session, summarize and store relevant info in long-term memory
+   */
+  static async summarizeSessionToLongTerm(agentId: string): Promise<void> {
+    // Get recent conversation and memories
+    const conversation = await this.getConversation(agentId);
+    const memories = await AgentMemory.getRecentMemories(agentId, 20);
+    // Generate a summary (could use OpenAI or similar)
+    const summaryPrompt =
+      "Summarize the most important facts, events, and learnings from this session for long-term memory.";
+    const agentRes = await fetch(`/api/agents/${agentId}`);
+    if (!agentRes.ok) return;
+    const agent: Agent = await agentRes.json();
+    const summary = await this.generateAgentResponse(
+      agent,
+      summaryPrompt +
+        "\n\nConversation:\n" +
+        conversation.messages.map((m) => `${m.role}: ${m.content}`).join("\n") +
+        "\n\nMemories:\n" +
+        memories.map((m) => `- ${m.content}`).join("\n"),
+      conversation.messages.slice(-10)
+    );
+    // Store summary in long-term memory
+    await AgentMemory.setFact(agentId, "session_summary", summary);
+  }
 
-// Initialization is now handled via the init() method called from App.tsx
+  /**
+   * Terminate an agent and delete all its data (agent record, memories, chat, long-term facts, A2A messages)
+   */
+  static async terminateAgent(agentId: string): Promise<void> {
+    // Delete agent record
+    await fetch(`/api/agents/${agentId}`, { method: "DELETE" });
+    // Delete short-term memory
+    await fetch(`/api/memory/delete/agent:${agentId}:memories`, {
+      method: "DELETE",
+    });
+    // Delete chat history
+    await fetch(`/api/memory/delete/agent:${agentId}:chat`, {
+      method: "DELETE",
+    });
+    // Delete long-term facts (assume backend endpoint exists)
+    await fetch(`/api/longterm/delete/${agentId}`, { method: "DELETE" });
+    // Delete A2A messages (assume backend endpoint exists)
+    await fetch(`/api/memory/delete/a2a:messages/${agentId}`, {
+      method: "DELETE",
+    });
+  }
+}
