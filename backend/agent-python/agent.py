@@ -15,8 +15,7 @@ REDIS_URL = os.environ.get('REDIS_URL', 'redis://localhost:6379')
 
 r = redis.Redis.from_url(REDIS_URL, decode_responses=True)
 
-agent_context = AGENT_CONFIG.get('systemPrompt', '')
-agent_tools = AGENT_CONFIG.get('tools', [])
+# Cleaned: Removed agent_context and agent_tools, and mock response logic
 
 @app.post('/message')
 async def message_endpoint(req: Request):
@@ -33,10 +32,10 @@ async def message_endpoint(req: Request):
     # Retrieve last 10 messages
     history = [json.loads(x) for x in r.lrange(f"agent:{AGENT_ID}:messages", 0, 9)]
 
-    # TODO: Tool usage, LLM call, etc. For now, mock response
+    # Return the message as-is (future: parse for tool_call JSON if needed)
     response = {
         'role': 'agent',
-        'content': f"Echo: {message}\nContext: {agent_context}\nTools: {', '.join([t.get('name', '') for t in agent_tools])}",
+        'content': message,
         'timestamp': int(time.time()),
         'memory': history
     }

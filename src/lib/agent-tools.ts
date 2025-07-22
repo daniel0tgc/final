@@ -4,6 +4,7 @@
 import { Agent } from "@/types";
 import { v4 as uuidv4 } from "uuid";
 import { AgentMemory } from "@/lib/agent-memory";
+import { AgentExecution } from "./agent-execution";
 
 export interface ToolCall {
   tool_call: string;
@@ -221,51 +222,78 @@ export const crossAgentCommTool: ToolHandler = async (_args, _context) => {
 // Cross-agent communication log key
 const CROSS_AGENT_LOG_KEY = "cross_agent:log";
 
-// Tool: Send a message to another agent
+// Helper to log A2A messages in a central log
+async function logA2AMessage(entry: any) {
+  // Fetch existing log
+  const res = await fetch("/api/memory/get/a2a:messages");
+  let log: any[] = [];
+  try {
+    const data = await res.json();
+    log = Array.isArray(data.value)
+      ? data.value
+      : data.value
+      ? [data.value]
+      : [];
+  } catch {}
+  // Append new entry
+  log.push(entry);
+  // Save back
+  await fetch("/api/memory/set", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key: "a2a:messages", value: log }),
+  });
+}
+
+// Tool: Send a message to another agent and trigger their response
 export const sendMessageTool: ToolHandler = async (args, context) => {
   const { to_id, message } = args;
   if (!to_id || !message) throw new Error("to_id and message are required");
-  const logEntry = {
-    id: uuidv4(),
+
+  const timestamp = new Date().toISOString();
+  const entry = {
     from: context.agent.id,
     to: to_id,
     message,
-    timestamp: new Date().toISOString(),
+    timestamp,
     direction: "sent",
+    type: "a2a_message",
   };
-  // Store in Redis (short-term) for both agents
-  await fetch(`/api/memory/add/${CROSS_AGENT_LOG_KEY}:${context.agent.id}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(logEntry),
+  await logA2AMessage(entry);
+
+  // Log the outgoing message in sender's memory
+  await AgentMemory.addMemory(context.agent.id, {
+    type: "observation",
+    content: `Sent to ${to_id}: ${message}`,
+    importance: 6,
+    metadata: { to: to_id, direction: "sent" },
   });
-  await fetch(`/api/memory/add/${CROSS_AGENT_LOG_KEY}:${to_id}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...logEntry, direction: "received" }),
+
+  // Log the incoming message in receiver's memory
+  await AgentMemory.addMemory(to_id, {
+    type: "message_received",
+    content: `Received from ${context.agent.id}: ${message}`,
+    importance: 6,
+    metadata: { from: context.agent.id, direction: "received" },
   });
-  // Store in PostgreSQL (long-term) for both agents
-  await fetch(`/api/longterm/set`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      agentId: context.agent.id,
-      key: `${CROSS_AGENT_LOG_KEY}:${context.agent.id}`,
-      value: JSON.stringify(logEntry),
-    }),
-  });
-  await fetch(`/api/longterm/set`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      agentId: to_id,
-      key: `${CROSS_AGENT_LOG_KEY}:${to_id}`,
-      value: JSON.stringify({ ...logEntry, direction: "received" }),
-    }),
-  });
+
+  // Trigger the receiving agent to process the message as a user message
+  const response = await AgentExecution.sendMessage(to_id, message);
+
+  // Log the response in the A2A log as well
+  const responseEntry = {
+    from: to_id,
+    to: context.agent.id,
+    message: response.content,
+    timestamp: new Date().toISOString(),
+    direction: "response",
+    type: "a2a_response",
+  };
+  await logA2AMessage(responseEntry);
+
   return {
     tool_call: "SEND_MESSAGE",
-    result: "Message sent to agent " + to_id,
+    result: `Message sent to agent ${to_id} and processed.`,
   };
 };
 
@@ -273,33 +301,43 @@ export const sendMessageTool: ToolHandler = async (args, context) => {
 export const receiveMessageTool: ToolHandler = async (args, context) => {
   const { from_id, message } = args;
   if (!from_id || !message) throw new Error("from_id and message are required");
-  const logEntry = {
-    id: uuidv4(),
+
+  const timestamp = new Date().toISOString();
+  const entry = {
     from: from_id,
     to: context.agent.id,
     message,
-    timestamp: new Date().toISOString(),
+    timestamp,
     direction: "received",
+    type: "a2a_message",
   };
-  // Store in Redis (short-term)
-  await fetch(`/api/memory/add/${CROSS_AGENT_LOG_KEY}:${context.agent.id}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(logEntry),
+  await logA2AMessage(entry);
+
+  // Log the incoming message in receiver's memory
+  await AgentMemory.addMemory(context.agent.id, {
+    type: "message_received",
+    content: `Received from ${from_id}: ${message}`,
+    importance: 6,
+    metadata: { from: from_id, direction: "received" },
   });
-  // Store in PostgreSQL (long-term)
-  await fetch(`/api/longterm/set`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      agentId: context.agent.id,
-      key: `${CROSS_AGENT_LOG_KEY}:${context.agent.id}`,
-      value: JSON.stringify(logEntry),
-    }),
-  });
+
+  // Process the message as a user message for the receiving agent
+  const response = await AgentExecution.sendMessage(context.agent.id, message);
+
+  // Log the response in the A2A log as well
+  const responseEntry = {
+    from: context.agent.id,
+    to: from_id,
+    message: response.content,
+    timestamp: new Date().toISOString(),
+    direction: "response",
+    type: "a2a_response",
+  };
+  await logA2AMessage(responseEntry);
+
   return {
     tool_call: "RECEIVE_MESSAGE",
-    result: "Message received from agent " + from_id,
+    result: `Message from agent ${from_id} received and processed.`,
   };
 };
 

@@ -1,11 +1,17 @@
-import { useState } from 'react';
-import { Card, CardContent, CardHeader, CardTitle, CardFooter } from '@/components/ui/card';
-import { Agent } from '@/types';
-import { Network, Send, Loader2 } from 'lucide-react';
-import { A2ACommunication } from '@/lib/a2a-communication';
-import { Button } from '@/components/ui/button';
-import { Textarea } from '@/components/ui/textarea';
-import { AgentMemory } from '@/lib/agent-memory';
+import { useState } from "react";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  CardFooter,
+} from "@/components/ui/card";
+import { Agent } from "@/types";
+import { Network, Send, Loader2 } from "lucide-react";
+import { agentToolRegistry } from "@/lib/agent-tools";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { AgentMemory } from "@/lib/agent-memory";
 
 interface A2AMessageComposerProps {
   sourceAgent: Agent;
@@ -13,48 +19,47 @@ interface A2AMessageComposerProps {
   onMessageSent?: () => void;
 }
 
-export function A2AMessageComposer({ 
-  sourceAgent, 
+export function A2AMessageComposer({
+  sourceAgent,
   allAgents,
-  onMessageSent 
+  onMessageSent,
 }: A2AMessageComposerProps) {
-  const [targetAgentId, setTargetAgentId] = useState<string>('');
-  const [message, setMessage] = useState('');
+  const [targetAgentId, setTargetAgentId] = useState<string>("");
+  const [message, setMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
-  
+
   const handleSendMessage = async () => {
     if (!targetAgentId || !message.trim() || isSending) return;
-    
-    const targetAgent = allAgents.find(a => a.id === targetAgentId);
-    if (!targetAgent) return;
-    
+
     setIsSending(true);
     try {
-      await A2ACommunication.sendMessage(
-        sourceAgent.id,
-        sourceAgent.config.name,
-        targetAgent.id,
-        targetAgent.config.name,
-        message
+      await agentToolRegistry.SEND_MESSAGE(
+        {
+          to_id: targetAgentId,
+          message,
+        },
+        { agent: sourceAgent }
       );
-      
+
       // Add an observation to agent memory
       AgentMemory.addMemory(sourceAgent.id, {
-        type: 'observation',
-        content: `Message sent to ${targetAgent.config.name}: ${message}`,
-        importance: 6
+        type: "observation",
+        content: `Message sent to ${
+          allAgents.find((a) => a.id === targetAgentId)?.config.name
+        }: ${message}`,
+        importance: 6,
       });
-      
+
       // Clear form after successful send
-      setMessage('');
-      
+      setMessage("");
+
       // Callback to refresh parent components if needed
       if (onMessageSent) {
         onMessageSent();
       }
     } catch (error) {
-      console.error('Error sending A2A message:', error);
-      alert('Failed to send message to agent');
+      console.error("Error sending A2A message:", error);
+      alert("Failed to send message to agent");
     } finally {
       setIsSending(false);
     }
@@ -68,19 +73,22 @@ export function A2AMessageComposer({
           Send Agent-to-Agent Message
         </CardTitle>
       </CardHeader>
-      
+
       <CardContent className="space-y-4">
         <div>
           <label className="block text-sm font-medium mb-1">
             From: <span className="font-bold">{sourceAgent.config.name}</span>
           </label>
         </div>
-        
+
         <div>
-          <label htmlFor="targetAgent" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="targetAgent"
+            className="block text-sm font-medium mb-1"
+          >
             To:
           </label>
-          <select 
+          <select
             id="targetAgent"
             className="w-full p-2 border rounded-md"
             value={targetAgentId}
@@ -89,17 +97,20 @@ export function A2AMessageComposer({
           >
             <option value="">Select an agent...</option>
             {allAgents
-              .filter(agent => agent.id !== sourceAgent.id)
-              .map(agent => (
+              .filter((agent) => agent.id !== sourceAgent.id)
+              .map((agent) => (
                 <option key={agent.id} value={agent.id}>
                   {agent.config.name} ({agent.config.type})
                 </option>
               ))}
           </select>
         </div>
-        
+
         <div>
-          <label htmlFor="messageContent" className="block text-sm font-medium mb-1">
+          <label
+            htmlFor="messageContent"
+            className="block text-sm font-medium mb-1"
+          >
             Message:
           </label>
           <Textarea
@@ -113,9 +124,9 @@ export function A2AMessageComposer({
           />
         </div>
       </CardContent>
-      
+
       <CardFooter>
-        <Button 
+        <Button
           onClick={handleSendMessage}
           disabled={!targetAgentId || !message.trim() || isSending}
           className="w-full"

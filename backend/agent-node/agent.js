@@ -16,31 +16,27 @@ const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 const redis = createClient({ url: REDIS_URL });
 redis.connect().catch(console.error);
 
-// Example: Load context/tools from config
-const agentContext = AGENT_CONFIG.systemPrompt || "";
-const agentTools = AGENT_CONFIG.tools || [];
+// Cleaned: Removed agentContext and agentTools, and mock response logic
 
 app.post("/message", async (req, res) => {
   const { message } = req.body;
   if (!message) return res.status(400).json({ error: "Missing message" });
 
-  // Example: Store message in shared memory (Redis)
+  // Store message in shared memory (Redis)
   await redis.lPush(
     `agent:${AGENT_ID}:messages`,
     JSON.stringify({ role: "user", content: message, timestamp: Date.now() })
   );
 
-  // Example: Retrieve last 10 messages
+  // Retrieve last 10 messages
   const history = (await redis.lRange(`agent:${AGENT_ID}:messages`, 0, 9)).map(
     JSON.parse
   );
 
-  // TODO: Tool usage, LLM call, etc. For now, mock response
+  // Return the message as-is (future: parse for tool_call JSON if needed)
   const response = {
     role: "agent",
-    content: `Echo: ${message}\nContext: ${agentContext}\nTools: ${agentTools
-      .map((t) => t.name)
-      .join(", ")}`,
+    content: message,
     timestamp: Date.now(),
     memory: history,
   };

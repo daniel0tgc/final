@@ -15,7 +15,6 @@ import NewMCPServerPage from "./pages/mcp-servers/new";
 import SettingsPage from "./pages/settings";
 import CollaborationPage from "./pages/collaboration";
 import { useEffect } from "react";
-import { A2ACommunication } from "./lib/a2a-communication";
 import { AgentMemory } from "./lib/agent-memory";
 import { AgentExecution } from "./lib/agent-execution";
 import { AIService } from "./lib/ai-service";
@@ -26,7 +25,6 @@ const App = () => {
   // Initialize services when app starts
   useEffect(() => {
     // Initialize A2A communication, Agent Memory, Agent Execution, and AI Service
-    A2ACommunication.init();
     AgentMemory.init();
     AgentExecution.init();
     AIService.init();
@@ -34,8 +32,6 @@ const App = () => {
     // Expose for debugging
     // @ts-ignore
     window.AgentMemory = AgentMemory;
-    // @ts-ignore
-    window.A2ACommunication = A2ACommunication;
   }, []);
 
   return (
