@@ -1,6 +1,7 @@
 #!/bin/bash
 # Enhanced Platform Stop Script
 # Cleanly stops both enhanced and original systems
+# .stop-platform.sh
 
 # Colors for output
 RED='\033[0;31m'
@@ -22,7 +23,7 @@ echo ""
 stop_by_pid() {
     local pid_file=$1
     local service_name=$2
-    
+
     if [ -f "$pid_file" ]; then
         local pid=$(cat "$pid_file")
         if kill -0 "$pid" 2>/dev/null; then

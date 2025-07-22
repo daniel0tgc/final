@@ -1,10 +1,14 @@
 #!/bin/bash
 # Enhanced Platform Management Script
-# Usage: 
+# Usage:
 #   ./start-platform.sh               - Start enhanced system (default)
 #   ./start-platform.sh enhanced      - Start enhanced system explicitly
 #   ./start-platform.sh old           - Start old system for comparison
 #   ./start-platform.sh both          - Start both systems side-by-side
+
+#   pnpm install
+#   pnpm run dev
+
 
 # Colors for output
 RED='\033[0;31m'
@@ -94,22 +98,22 @@ start_backend() {
     local port=$1
     local system_name=$2
     local working_dir=$3
-    
+
     echo -e "${CYAN}🔧 Starting $system_name backend on port $port...${NC}"
     cd $working_dir
-    
+
     # Check if node_modules exists, if not install
     if [ ! -d "node_modules" ]; then
         echo -e "${YELLOW}📥 Installing backend dependencies...${NC}"
         npm install
     fi
-    
+
     # Set port and start
     PORT=$port npm start &
     local pid=$!
     echo $pid > "../.${system_name,,}_backend.pid"
     cd ..
-    
+
     echo -e "${GREEN}✅ $system_name backend started (PID: $pid, Port: $port).${NC}"
 }
 
@@ -118,29 +122,29 @@ start_frontend() {
     local port=$1
     local system_name=$2
     local working_dir=$3
-    
+
     echo -e "${CYAN}🎨 Starting $system_name frontend on port $port...${NC}"
     cd $working_dir
-    
+
     # Check if node_modules exists, if not install
     if [ ! -d "node_modules" ]; then
         echo -e "${YELLOW}📥 Installing frontend dependencies...${NC}"
         npm install
     fi
-    
+
     # Start with specific port
     npm run dev -- --port $port &
     local pid=$!
     echo $pid > "../.${system_name,,}_frontend.pid"
     cd ..
-    
+
     echo -e "${GREEN}✅ $system_name frontend started (PID: $pid, Port: $port).${NC}"
 }
 
 # Start systems based on mode
 if [ "$SYSTEM_MODE" = "enhanced" ] || [ "$SYSTEM_MODE" = "both" ]; then
     echo -e "\n${GREEN}🚀 Starting Enhanced System...${NC}"
-    
+
     # Check if enhanced system ports are available
     if [ "$SYSTEM_MODE" = "enhanced" ]; then
         BACKEND_PORT=$(find_free_port 4000)
@@ -149,13 +153,13 @@ if [ "$SYSTEM_MODE" = "enhanced" ] || [ "$SYSTEM_MODE" = "both" ]; then
         BACKEND_PORT=4000
         FRONTEND_PORT=5173
     fi
-    
+
     # Start enhanced backend
     start_backend $BACKEND_PORT "Enhanced" "backend"
-    
+
     # Start enhanced frontend (current directory)
     start_frontend $FRONTEND_PORT "Enhanced" "."
-    
+
     # Store enhanced system info
     echo "ENHANCED_BACKEND_PORT=$BACKEND_PORT" > .enhanced_ports
     echo "ENHANCED_FRONTEND_PORT=$FRONTEND_PORT" >> .enhanced_ports
@@ -163,7 +167,7 @@ fi
 
 if [ "$SYSTEM_MODE" = "old" ] || [ "$SYSTEM_MODE" = "both" ]; then
     echo -e "\n${BLUE}🔄 Starting Original System...${NC}"
-    
+
     # Check if we have the original system in a separate directory
     if [ ! -d "../original" ] && [ -d "../backend" ]; then
         echo -e "${YELLOW}📁 Original system detected in parent directory...${NC}"
@@ -177,7 +181,7 @@ if [ "$SYSTEM_MODE" = "old" ] || [ "$SYSTEM_MODE" = "both" ]; then
         ORIGINAL_BACKEND="backend"
         ORIGINAL_FRONTEND="."
     fi
-    
+
     # Set ports for original system
     if [ "$SYSTEM_MODE" = "old" ]; then
         BACKEND_PORT=$(find_free_port 4000)
@@ -186,13 +190,13 @@ if [ "$SYSTEM_MODE" = "old" ] || [ "$SYSTEM_MODE" = "both" ]; then
         BACKEND_PORT=4001
         FRONTEND_PORT=5174
     fi
-    
+
     # Start original backend
     start_backend $BACKEND_PORT "Original" "$ORIGINAL_BACKEND"
-    
+
     # Start original frontend
     start_frontend $FRONTEND_PORT "Original" "$ORIGINAL_FRONTEND"
-    
+
     # Store original system info
     echo "ORIGINAL_BACKEND_PORT=$BACKEND_PORT" > .original_ports
     echo "ORIGINAL_FRONTEND_PORT=$FRONTEND_PORT" >> .original_ports
