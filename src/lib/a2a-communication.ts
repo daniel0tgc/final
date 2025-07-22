@@ -185,6 +185,9 @@ export class A2ACommunication {
     // Store message
     await this.storeMessage(newMessage);
 
+    // Log A2A communication
+    await this.logA2ACommunication(newMessage);
+
     // Update agent states
     await this.updateAgentActivity(sourceAgentId);
     
@@ -630,6 +633,38 @@ export class A2ACommunication {
   }
 
   // Private helper methods
+
+  /**
+   * Log A2A communication for monitoring and debugging
+   */
+  private static async logA2ACommunication(message: A2AMessage): Promise<void> {
+    try {
+      const logEntry = {
+        id: `a2a_log_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        timestamp: message.timestamp,
+        sourceAgentId: message.sourceAgentId,
+        sourceAgentName: message.sourceAgentName,
+        targetAgentId: message.targetAgentId,
+        targetAgentName: message.targetAgentName,
+        messageType: message.messageType,
+        priority: message.priority,
+        status: message.status,
+        message: message.message,
+        requiresApproval: message.requiresApproval || false,
+        approvalStatus: message.approvalStatus,
+        contextId: message.contextId,
+        taskId: message.taskId
+      };
+
+      await fetch('/api/logs/a2a', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(logEntry)
+      });
+    } catch (error) {
+      console.error('Failed to log A2A communication:', error);
+    }
+  }
 
   private static async storeMessage(message: A2AMessage): Promise<void> {
     const messages = await this.getAllMessages();

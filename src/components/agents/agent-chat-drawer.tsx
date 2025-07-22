@@ -9,12 +9,14 @@ import {
 } from "@/components/ui/drawer";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Bot, Send, X, User, Loader2 } from "lucide-react";
+import { Bot, Send, X, User, Loader2, CheckCircle, XCircle, Clock } from "lucide-react";
 import { Agent } from "@/types";
 import { AgentExecution, AgentMessage } from "@/lib/agent-execution";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { format } from "date-fns";
 import { Separator } from "@/components/ui/separator";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 
 interface AgentChatDrawerProps {
   agent: Agent | null;
@@ -33,6 +35,7 @@ export function AgentChatDrawer({
   const [thoughtSteps, setThoughtSteps] = useState<string[]>([]);
   const [showThoughts, setShowThoughts] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [pendingApprovals, setPendingApprovals] = useState<any[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Load conversation when agent changes or drawer opens
@@ -54,8 +57,46 @@ export function AgentChatDrawer({
         }
       };
       loadConversation();
+      loadPendingApprovals();
     }
   }, [agent, open]);
+
+  // Load pending approvals for this agent
+  const loadPendingApprovals = async () => {
+    if (!agent) return;
+    
+    try {
+      const response = await fetch(`/api/approvals/pending?agentId=${agent.id}`);
+      if (response.ok) {
+        const approvals = await response.json();
+        setPendingApprovals(approvals);
+      }
+    } catch (error) {
+      console.error('Failed to load pending approvals:', error);
+    }
+  };
+
+  // Handle tool approval
+  const handleToolApproval = async (approvalId: string, approved: boolean, reason?: string) => {
+    try {
+      const result = await AgentExecution.approveToolCall(approvalId, approved, reason);
+      
+      if (result.success) {
+        // Remove from pending approvals
+        setPendingApprovals(prev => prev.filter(approval => approval.id !== approvalId));
+        
+        // Refresh conversation to show updated results
+        if (agent) {
+          const agentConversation = await AgentExecution.getConversation(agent.id);
+          setConversation(
+            agentConversation.messages.filter((msg) => msg.role !== "system")
+          );
+        }
+      }
+    } catch (error) {
+      console.error('Failed to process approval:', error);
+    }
+  };
 
   // Scroll to bottom when conversation updates
   useEffect(() => {
@@ -155,6 +196,56 @@ export function AgentChatDrawer({
             ) : (
               <ScrollArea className="flex-1 p-4">
                 <div className="flex flex-col space-y-4">
+                  {/* Pending Approvals Section */}
+                  {pendingApprovals.length > 0 && (
+                    <div className="space-y-2">
+                      <h4 className="text-sm font-medium text-orange-600 flex items-center gap-2">
+                        <Clock className="h-4 w-4" />
+                        Pending Tool Approvals ({pendingApprovals.length})
+                      </h4>
+                      {pendingApprovals.map((approval) => (
+                        <Card key={approval.id} className="border-orange-200 bg-orange-50">
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-sm flex items-center justify-between">
+                              <span>Tool: {approval.toolCall.tool_call}</span>
+                              <Badge variant="outline" className="text-orange-600">
+                                Pending Approval
+                              </Badge>
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="space-y-3">
+                            <div>
+                              <p className="text-xs font-medium text-gray-600 mb-1">Arguments:</p>
+                              <pre className="text-xs bg-white p-2 rounded border overflow-x-auto">
+                                {JSON.stringify(approval.toolCall.args, null, 2)}
+                              </pre>
+                            </div>
+                            <div className="flex gap-2">
+                              <Button
+                                size="sm"
+                                onClick={() => handleToolApproval(approval.id, true, 'Approved by user')}
+                                className="bg-green-600 hover:bg-green-700"
+                              >
+                                <CheckCircle className="h-4 w-4 mr-1" />
+                                Approve
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleToolApproval(approval.id, false, 'Rejected by user')}
+                                className="border-red-500 text-red-600 hover:bg-red-50"
+                              >
+                                <XCircle className="h-4 w-4 mr-1" />
+                                Reject
+                              </Button>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Chat Messages */}
                   {(showThoughts
                     ? conversation
                     : conversation.filter((msg) => msg.role !== "system")
