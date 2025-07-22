@@ -96,9 +96,9 @@ export function AgentCollaboration() {
     try {
       await A2ACommunication.sendMessage(
         messageForm.sourceAgent,
-        \`Agent-\${messageForm.sourceAgent}\`,
+        `Agent-${messageForm.sourceAgent}`,
         messageForm.targetAgent,
-        \`Agent-\${messageForm.targetAgent}\`,
+        `Agent-${messageForm.targetAgent}`,
         messageForm.message,
         {
           messageType: messageForm.messageType,
@@ -152,7 +152,7 @@ export function AgentCollaboration() {
 
   const processApproval = async (approvalId: string, approved: boolean, reason?: string) => {
     try {
-      const response = await fetch(\`/api/approvals/\${approvalId}/process\`, {
+      const response = await fetch(`/api/approvals/${approvalId}/process`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -165,7 +165,7 @@ export function AgentCollaboration() {
       if (response.ok) {
         loadPendingApprovals();
         loadCollaborativeTasks();
-        alert(\`Approval \${approved ? 'granted' : 'denied'} successfully!\`);
+        alert(`Approval ${approved ? 'granted' : 'denied'} successfully!`);
       }
     } catch (error) {
       console.error('Failed to process approval:', error);
