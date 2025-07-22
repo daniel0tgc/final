@@ -3,7 +3,7 @@ import Docker from "dockerode";
 import { createClient } from "redis";
 import pkg from "pg";
 const { Pool } = pkg;
-import { mcpServerManager } from "./mcp-server-manager.js";
+// MCP server manager removed - not needed for core functionality
 
 const app = express();
 const docker = new Docker();
@@ -460,27 +460,8 @@ app.post("/api/mcp-servers", async (req, res) => {
     let serverTools = [];
     let serverStatus = "offline";
 
-    // If serverType is provided, start the actual MCP server
-    if (serverType) {
-      try {
-        const serverInfo = await mcpServerManager.startServer(serverType);
-        serverUrl = serverInfo.url;
-        serverStatus = "online";
-
-        // Get tools from the running server
-        try {
-          serverTools = await mcpServerManager.getServerTools(serverType);
-        } catch (toolError) {
-          console.warn(
-            `Could not get tools from ${serverType}:`,
-            toolError.message
-          );
-        }
-      } catch (startError) {
-        console.error(`Failed to start ${serverType} server:`, startError);
-        serverStatus = "error";
-      }
-    } else if (url) {
+    // Use provided URL for MCP server configuration
+    if (url) {
       // Try to discover tools from the provided URL
       try {
         const toolsResponse = await fetch(`${url}/tools`, {
@@ -666,61 +647,269 @@ app.post("/api/mcp-servers/:id/execute", async (req, res) => {
   }
 });
 
-// Start a built-in MCP server
-app.post("/api/mcp-servers/start/:serverType", async (req, res) => {
-  const { serverType } = req.params;
+// MCP server management endpoints removed - focusing on core agent functionality
 
+// Tool Approval Management Endpoints
+
+// Create tables for approvals and logs
+async function ensureApprovalsTable() {
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS tool_approvals (
+      id VARCHAR(64) PRIMARY KEY,
+      agent_id VARCHAR(64) NOT NULL,
+      tool_call JSONB NOT NULL,
+      context JSONB,
+      status VARCHAR(20) DEFAULT 'pending',
+      reason TEXT,
+      result JSONB,
+      created_at TIMESTAMP DEFAULT NOW(),
+      processed_at TIMESTAMP,
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+    );
+  `);
+}
+ensureApprovalsTable();
+
+async function ensureToolLogsTable() {
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS tool_logs (
+      id VARCHAR(64) PRIMARY KEY,
+      agent_id VARCHAR(64) NOT NULL,
+      tool_name VARCHAR(255) NOT NULL,
+      tool_args JSONB,
+      result JSONB,
+      status VARCHAR(20) NOT NULL,
+      error TEXT,
+      execution_time INTEGER,
+      created_at TIMESTAMP DEFAULT NOW(),
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+    );
+  `);
+}
+ensureToolLogsTable();
+
+async function ensureSystemLogsTable() {
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS system_logs (
+      id VARCHAR(64) PRIMARY KEY,
+      timestamp TIMESTAMP DEFAULT NOW(),
+      level VARCHAR(10) NOT NULL,
+      category VARCHAR(20) NOT NULL,
+      agent_id VARCHAR(64),
+      agent_name VARCHAR(255),
+      message TEXT NOT NULL,
+      details JSONB,
+      metadata JSONB
+    );
+  `);
+}
+ensureSystemLogsTable();
+
+// Create a new approval request
+app.post("/api/approvals", async (req, res) => {
+  const { id, agentId, toolCall, context, status, timestamp } = req.body;
+  
   try {
-    const serverInfo = await mcpServerManager.startServer(serverType);
-    let tools = [];
-
-    try {
-      tools = await mcpServerManager.getServerTools(serverType);
-    } catch (toolError) {
-      console.warn(
-        `Could not get tools from ${serverType}:`,
-        toolError.message
-      );
-    }
-
-    res.json({
-      status: "started",
-      serverInfo,
-      tools,
-    });
+    await pgPool.query(
+      `INSERT INTO tool_approvals (id, agent_id, tool_call, context, status, created_at) 
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [id, agentId, toolCall, context, status || 'pending', timestamp || new Date().toISOString()]
+    );
+    
+    res.json({ success: true, id });
   } catch (err) {
+    console.error('Failed to create approval:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Stop a built-in MCP server
-app.post("/api/mcp-servers/stop/:serverType", async (req, res) => {
-  const { serverType } = req.params;
-
+// Get pending approvals for an agent
+app.get("/api/approvals/pending", async (req, res) => {
+  const { agentId } = req.query;
+  
   try {
-    await mcpServerManager.stopServer(serverType);
-    res.json({ status: "stopped" });
+    let query = "SELECT * FROM tool_approvals WHERE status = 'pending'";
+    let params = [];
+    
+    if (agentId) {
+      query += " AND agent_id = $1";
+      params.push(agentId);
+    }
+    
+    query += " ORDER BY created_at DESC";
+    
+    const result = await pgPool.query(query, params);
+    res.json(result.rows);
   } catch (err) {
+    console.error('Failed to fetch pending approvals:', err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// Get status of built-in MCP servers
-app.get("/api/mcp-servers/status", async (req, res) => {
+// Get specific approval
+app.get("/api/approvals/:id", async (req, res) => {
+  const { id } = req.params;
+  
   try {
-    const runningServers = mcpServerManager.getRunningServers();
-    const statuses = {};
-
-    for (const server of runningServers) {
-      statuses[server.type] = {
-        status: "online",
-        url: server.url,
-        startTime: server.startTime,
-      };
+    const result = await pgPool.query(
+      "SELECT * FROM tool_approvals WHERE id = $1",
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Approval not found" });
     }
-
-    res.json(statuses);
+    
+    res.json(result.rows[0]);
   } catch (err) {
+    console.error('Failed to fetch approval:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update approval status
+app.put("/api/approvals/:id", async (req, res) => {
+  const { id } = req.params;
+  const { status, reason, result, processedAt } = req.body;
+  
+  try {
+    await pgPool.query(
+      `UPDATE tool_approvals 
+       SET status = $1, reason = $2, result = $3, processed_at = $4 
+       WHERE id = $5`,
+      [status, reason, result, processedAt || new Date().toISOString(), id]
+    );
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Failed to update approval:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Log tool execution
+app.post("/api/logs/tools", async (req, res) => {
+  const { id, agentId, toolName, toolArgs, result, status, error, executionTime } = req.body;
+  
+  try {
+    await pgPool.query(
+      `INSERT INTO tool_logs (id, agent_id, tool_name, tool_args, result, status, error, execution_time) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [id, agentId, toolName, toolArgs, result, status, error, executionTime]
+    );
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Failed to log tool execution:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get tool logs
+app.get("/api/logs/tools", async (req, res) => {
+  try {
+    const result = await pgPool.query(
+      "SELECT * FROM tool_logs ORDER BY created_at DESC LIMIT 1000"
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Failed to fetch tool logs:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Log system events
+app.post("/api/logs", async (req, res) => {
+  const { id, level, category, agentId, agentName, message, details, metadata } = req.body;
+  
+  try {
+    await pgPool.query(
+      `INSERT INTO system_logs (id, level, category, agent_id, agent_name, message, details, metadata) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [id, level, category, agentId, agentName, message, details, metadata]
+    );
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Failed to log system event:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get system logs
+app.get("/api/logs", async (req, res) => {
+  try {
+    const result = await pgPool.query(
+      "SELECT * FROM system_logs ORDER BY timestamp DESC LIMIT 1000"
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Failed to fetch system logs:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// A2A Communication Logs Table
+async function ensureA2ALogsTable() {
+  await pgPool.query(`
+    CREATE TABLE IF NOT EXISTS a2a_logs (
+      id VARCHAR(64) PRIMARY KEY,
+      timestamp TIMESTAMP DEFAULT NOW(),
+      source_agent_id VARCHAR(64) NOT NULL,
+      source_agent_name VARCHAR(255) NOT NULL,
+      target_agent_id VARCHAR(64) NOT NULL,
+      target_agent_name VARCHAR(255) NOT NULL,
+      message_type VARCHAR(20) NOT NULL,
+      priority VARCHAR(10) NOT NULL,
+      status VARCHAR(20) NOT NULL,
+      message TEXT NOT NULL,
+      requires_approval BOOLEAN DEFAULT FALSE,
+      approval_status VARCHAR(20),
+      context_id VARCHAR(64),
+      task_id VARCHAR(64)
+    );
+  `);
+}
+ensureA2ALogsTable();
+
+// Log A2A communication
+app.post("/api/logs/a2a", async (req, res) => {
+  const { 
+    id, timestamp, sourceAgentId, sourceAgentName, targetAgentId, targetAgentName,
+    messageType, priority, status, message, requiresApproval, approvalStatus,
+    contextId, taskId 
+  } = req.body;
+  
+  try {
+    await pgPool.query(
+      `INSERT INTO a2a_logs (
+        id, timestamp, source_agent_id, source_agent_name, target_agent_id, target_agent_name,
+        message_type, priority, status, message, requires_approval, approval_status,
+        context_id, task_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+      [
+        id, timestamp || new Date().toISOString(), sourceAgentId, sourceAgentName, 
+        targetAgentId, targetAgentName, messageType, priority, status, message,
+        requiresApproval || false, approvalStatus, contextId, taskId
+      ]
+    );
+    
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Failed to log A2A communication:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get A2A communication logs
+app.get("/api/logs/a2a", async (req, res) => {
+  try {
+    const result = await pgPool.query(
+      "SELECT * FROM a2a_logs ORDER BY timestamp DESC LIMIT 1000"
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Failed to fetch A2A logs:', err);
     res.status(500).json({ error: err.message });
   }
 });

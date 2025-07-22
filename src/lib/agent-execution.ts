@@ -189,28 +189,63 @@ export class AgentExecution {
         }
       } catch {}
 
-      // If tool call detected, handle it and re-prompt LLM with tool result
+      // If tool call detected, handle it with approval workflow
       if (toolCall && agentToolRegistry[toolCall.tool_call]) {
-        if (onThoughtStep) onThoughtStep(`Calling tool: ${toolCall.tool_call}`);
-        const toolResult: ToolResult = await agentToolRegistry[
-          toolCall.tool_call
-        ](toolCall.args || {}, { agent });
-        // Inject tool result as a system message and re-prompt LLM
-        const toolResultMsg: AgentMessage = {
-          role: "system",
-          content: JSON.stringify(toolResult),
-          timestamp: new Date().toISOString(),
-        };
-        const newContext: AgentMessage[] = [
-          ...recentMessages,
-          userMsg,
-          toolResultMsg,
-        ];
-        agentResponseContent = await this.generateAgentResponse(
-          agent,
-          message,
-          newContext
-        );
+        if (onThoughtStep) onThoughtStep(`Tool call detected: ${toolCall.tool_call}`);
+        
+        // Check if tool requires approval
+        const toolRequiresApproval = this.doesToolRequireApproval(toolCall.tool_call);
+        
+        if (toolRequiresApproval) {
+          if (onThoughtStep) onThoughtStep(`Tool ${toolCall.tool_call} requires approval - waiting for user confirmation`);
+          
+          // Store pending tool call for approval
+          await this.storePendingToolCall(agent.id, toolCall, {
+            message,
+            context: recentMessages,
+            timestamp: new Date().toISOString()
+          });
+          
+          // Return message indicating approval needed
+          agentResponseContent = `I need to use the tool "${toolCall.tool_call}" with arguments: ${JSON.stringify(toolCall.args, null, 2)}. 
+
+This tool requires your approval before I can proceed. Please review and approve/reject this tool usage.`;
+        } else {
+          // Execute tool directly
+          if (onThoughtStep) onThoughtStep(`Executing tool: ${toolCall.tool_call}`);
+          
+          try {
+            const toolResult: ToolResult = await agentToolRegistry[
+              toolCall.tool_call
+            ](toolCall.args || {}, { agent });
+            
+            // Log successful tool execution
+            await this.logToolExecution(agent.id, toolCall, toolResult, 'success');
+            
+            // Inject tool result as a system message and re-prompt LLM
+            const toolResultMsg: AgentMessage = {
+              role: "system",
+              content: JSON.stringify(toolResult),
+              timestamp: new Date().toISOString(),
+            };
+            const newContext: AgentMessage[] = [
+              ...recentMessages,
+              userMsg,
+              toolResultMsg,
+            ];
+            agentResponseContent = await this.generateAgentResponse(
+              agent,
+              message,
+              newContext
+            );
+          } catch (toolError) {
+            // Log failed tool execution
+            await this.logToolExecution(agent.id, toolCall, null, 'error', toolError instanceof Error ? toolError.message : 'Unknown error');
+            
+            if (onThoughtStep) onThoughtStep(`Tool execution failed: ${toolError}`);
+            agentResponseContent = `I encountered an error while using the ${toolCall.tool_call} tool: ${toolError instanceof Error ? toolError.message : 'Unknown error'}. Let me try a different approach.`;
+          }
+        }
       }
 
       // Create agent response message
@@ -245,6 +280,171 @@ export class AgentExecution {
           "Error: " + (error instanceof Error ? error.message : error)
         );
       throw error;
+    }
+  }
+
+  /**
+   * Check if a tool requires approval before execution
+   */
+  private static doesToolRequireApproval(toolName: string): boolean {
+    // List of tools that require approval - can be made configurable
+    const approvalRequiredTools = [
+      'send_email',
+      'delete_file',
+      'execute_code',
+      'make_api_call',
+      'transfer_funds',
+      'create_user',
+      'delete_user',
+      'modify_permissions'
+    ];
+    
+    return approvalRequiredTools.includes(toolName);
+  }
+
+  /**
+   * Store a pending tool call for approval
+   */
+  private static async storePendingToolCall(
+    agentId: string, 
+    toolCall: ToolCall, 
+    context: any
+  ): Promise<void> {
+    try {
+      const pendingApproval = {
+        id: `approval_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        agentId,
+        toolCall,
+        context,
+        status: 'pending',
+        timestamp: new Date().toISOString()
+      };
+
+      await fetch('/api/approvals', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pendingApproval)
+      });
+    } catch (error) {
+      console.error('Failed to store pending tool call:', error);
+    }
+  }
+
+  /**
+   * Log tool execution for monitoring and debugging
+   */
+  private static async logToolExecution(
+    agentId: string,
+    toolCall: ToolCall,
+    result: ToolResult | null,
+    status: 'success' | 'error' | 'pending',
+    error?: string
+  ): Promise<void> {
+    try {
+      const logEntry = {
+        id: `tool_log_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        timestamp: new Date().toISOString(),
+        agentId,
+        toolName: toolCall.tool_call,
+        toolArgs: toolCall.args,
+        result: result?.result,
+        status,
+        error,
+        executionTime: result ? Date.now() : undefined // This would need proper timing
+      };
+
+      await fetch('/api/logs/tools', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(logEntry)
+      });
+    } catch (error) {
+      console.error('Failed to log tool execution:', error);
+    }
+  }
+
+  /**
+   * Approve a pending tool call and execute it
+   */
+  static async approveToolCall(
+    approvalId: string, 
+    approved: boolean, 
+    reason?: string
+  ): Promise<{ success: boolean; result?: any; error?: string }> {
+    try {
+      // Get the pending approval
+      const response = await fetch(`/api/approvals/${approvalId}`);
+      if (!response.ok) {
+        throw new Error('Approval not found');
+      }
+      
+      const approval = await response.json();
+      
+      if (!approved) {
+        // Mark as rejected
+        await fetch(`/api/approvals/${approvalId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            status: 'rejected',
+            reason,
+            processedAt: new Date().toISOString()
+          })
+        });
+        
+        return { success: false, error: 'Tool call rejected by user' };
+      }
+
+      // Execute the approved tool
+      const { toolCall } = approval;
+      const agent = await this.getAgentById(approval.agentId);
+      
+      if (!agent) {
+        throw new Error('Agent not found');
+      }
+
+      const toolResult: ToolResult = await agentToolRegistry[toolCall.tool_call](
+        toolCall.args || {}, 
+        { agent }
+      );
+
+      // Log successful execution
+      await this.logToolExecution(approval.agentId, toolCall, toolResult, 'success');
+
+      // Mark as approved and executed
+      await fetch(`/api/approvals/${approvalId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          status: 'approved',
+          reason,
+          result: toolResult,
+          processedAt: new Date().toISOString()
+        })
+      });
+
+      return { success: true, result: toolResult };
+    } catch (error) {
+      console.error('Failed to approve tool call:', error);
+      return { 
+        success: false, 
+        error: error instanceof Error ? error.message : 'Unknown error' 
+      };
+    }
+  }
+
+  /**
+   * Get agent by ID - helper method
+   */
+  private static async getAgentById(agentId: string): Promise<Agent | null> {
+    try {
+      const response = await fetch(`/api/agents/${agentId}`);
+      if (response.ok) {
+        return response.json();
+      }
+      return null;
+    } catch {
+      return null;
     }
   }
 
