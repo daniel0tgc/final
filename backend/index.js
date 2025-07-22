@@ -201,6 +201,157 @@ app.get("/api/longterm/get/:agentId/:key", async (req, res) => {
   }
 });
 
+// Enhanced memory endpoints for collaborative features
+
+// Set shared memory data
+app.post("/api/memory/set", async (req, res) => {
+  const { key, value } = req.body;
+  if (!key || value === undefined)
+    return res.status(400).json({ error: "Missing key or value" });
+  
+  try {
+    const valueStr = typeof value === 'string' ? value : JSON.stringify(value);
+    await redis.set(key, valueStr);
+    res.json({ status: "ok" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get shared memory data
+app.get("/api/memory/get/:key", async (req, res) => {
+  const { key } = req.params;
+  try {
+    const value = await redis.get(key);
+    if (value === null) {
+      return res.json({ value: null });
+    }
+    
+    try {
+      const parsed = JSON.parse(value);
+      res.json({ value: parsed });
+    } catch {
+      res.json({ value: value });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Agent collaboration endpoints
+
+// Send message between agents
+app.post("/api/agents/message", async (req, res) => {
+  const { sourceAgentId, targetAgentId, message, messageType, priority, metadata } = req.body;
+  
+  if (!sourceAgentId || !targetAgentId || !message) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  try {
+    // Store message in Redis for real-time delivery
+    const messageData = {
+      id: require('crypto').randomUUID(),
+      sourceAgentId,
+      targetAgentId,
+      message,
+      messageType: messageType || "direct",
+      priority: priority || "medium",
+      timestamp: new Date().toISOString(),
+      status: "pending",
+      metadata: metadata || {}
+    };
+
+    // Add to target agent's message queue
+    await redis.lpush(`agent:${targetAgentId}:messages`, JSON.stringify(messageData));
+    
+    // Also store in global message log
+    const allMessages = await redis.get("a2a:messages");
+    const messages = allMessages ? JSON.parse(allMessages) : [];
+    messages.push(messageData);
+    await redis.set("a2a:messages", JSON.stringify(messages));
+
+    res.json({ status: "sent", messageId: messageData.id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get agent messages
+app.get("/api/agents/:agentId/messages", async (req, res) => {
+  const { agentId } = req.params;
+  
+  try {
+    const messages = await redis.lrange(`agent:${agentId}:messages`, 0, -1);
+    const parsedMessages = messages.map(msg => JSON.parse(msg));
+    res.json(parsedMessages);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Human approval endpoints
+
+// Get pending approvals
+app.get("/api/approvals/pending", async (req, res) => {
+  try {
+    const pendingApprovals = await redis.get("pending_approvals");
+    const approvals = pendingApprovals ? JSON.parse(pendingApprovals) : [];
+    res.json(approvals);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Process approval
+app.post("/api/approvals/:id/process", async (req, res) => {
+  const { id } = req.params;
+  const { approved, reason, approverName } = req.body;
+  
+  try {
+    const pendingApprovals = await redis.get("pending_approvals");
+    const approvals = pendingApprovals ? JSON.parse(pendingApprovals) : [];
+    
+    const approvalIndex = approvals.findIndex(a => a.id === id);
+    if (approvalIndex === -1) {
+      return res.status(404).json({ error: "Approval request not found" });
+    }
+
+    const approval = approvals[approvalIndex];
+    approval.status = approved ? "approved" : "rejected";
+    approval.processedAt = new Date().toISOString();
+    approval.processedBy = approverName;
+    approval.reason = reason;
+
+    // Update the related item (task, message, etc.)
+    if (approval.itemType === "task") {
+      // Update task status in collaborative tasks
+      const tasks = await redis.get("global:collaborative_tasks");
+      const taskList = tasks ? JSON.parse(tasks) : [];
+      const taskIndex = taskList.findIndex(t => t.id === approval.itemId);
+      
+      if (taskIndex >= 0) {
+        taskList[taskIndex].approvalStatus = approval.status;
+        taskList[taskIndex].approvedBy = approverName;
+        if (approved) {
+          taskList[taskIndex].status = "in_progress";
+        } else {
+          taskList[taskIndex].status = "failed";
+        }
+        await redis.set("global:collaborative_tasks", JSON.stringify(taskList));
+      }
+    }
+
+    // Remove from pending approvals
+    approvals.splice(approvalIndex, 1);
+    await redis.set("pending_approvals", JSON.stringify(approvals));
+
+    res.json({ status: "processed", approval });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // List all agents
 app.get("/api/agents", async (req, res) => {
   try {

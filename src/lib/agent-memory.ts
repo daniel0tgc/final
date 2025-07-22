@@ -10,11 +10,20 @@ export interface MemoryEntry {
     | "observation"
     | "reflection"
     | "message_received"
-    | "system";
+    | "system"
+    | "collaborative_context"
+    | "task_delegation"
+    | "shared_learning"
+    | "cross_agent_insight";
   content: string;
   importance: number;
   timestamp: string;
   metadata?: Record<string, any>;
+  // Enhanced fields for collaboration
+  sharedWith?: string[]; // Other agent IDs this memory is shared with
+  contextId?: string; // Reference to shared context
+  sourceAgentId?: string; // If this memory came from another agent
+  isShared?: boolean; // Whether this memory can be shared with other agents
 }
 
 // Utility for backend API base URL
@@ -97,6 +106,231 @@ export class AgentMemory {
       body: JSON.stringify({ key: `agent:${agentId}:memories`, value: [] }),
     });
     return true;
+  }
+
+  /**
+   * Add shared memory that can be accessed by multiple agents
+   */
+  static async addSharedMemory(
+    agentId: string,
+    {
+      type,
+      content,
+      importance,
+      sharedWith,
+      contextId,
+      metadata,
+    }: {
+      type: MemoryEntry["type"];
+      content: string;
+      importance?: number;
+      sharedWith: string[];
+      contextId?: string;
+      metadata?: Record<string, any>;
+    }
+  ): Promise<MemoryEntry | null> {
+    const entry: MemoryEntry = {
+      id: uuidv4(),
+      agentId,
+      type,
+      content,
+      importance: importance ?? this.assessImportance(content, type),
+      timestamp: new Date().toISOString(),
+      sharedWith,
+      contextId,
+      isShared: true,
+      metadata,
+    };
+
+    // Add to creator's memory
+    await this.addMemory(agentId, entry);
+
+    // Add to each shared agent's memory
+    for (const targetAgentId of sharedWith) {
+      if (targetAgentId !== agentId) {
+        const sharedEntry = {
+          ...entry,
+          id: uuidv4(), // New ID for each agent
+          agentId: targetAgentId,
+          sourceAgentId: agentId,
+        };
+        await this.addMemory(targetAgentId, sharedEntry);
+      }
+    }
+
+    return entry;
+  }
+
+  /**
+   * Get shared memories for an agent (memories shared with this agent)
+   */
+  static async getSharedMemories(agentId: string): Promise<MemoryEntry[]> {
+    const memories = await this.getMemories(agentId);
+    return memories.filter(memory => 
+      memory.isShared && 
+      (memory.sharedWith?.includes(agentId) || memory.sourceAgentId)
+    );
+  }
+
+  /**
+   * Get memories by context ID
+   */
+  static async getMemoriesByContext(contextId: string): Promise<MemoryEntry[]> {
+    // This is a simplified implementation - in a real system, you'd want proper indexing
+    const res = await fetch(`${API_BASE}/memory/get/global:context_memories:${contextId}`);
+    const data = await res.json();
+    if (Array.isArray(data.value)) return data.value;
+    if (data.value) return [data.value];
+    return [];
+  }
+
+  /**
+   * Add memory to a shared context
+   */
+  static async addContextMemory(
+    agentId: string,
+    contextId: string,
+    {
+      type,
+      content,
+      importance,
+      metadata,
+    }: {
+      type: MemoryEntry["type"];
+      content: string;
+      importance?: number;
+      metadata?: Record<string, any>;
+    }
+  ): Promise<MemoryEntry | null> {
+    const entry: MemoryEntry = {
+      id: uuidv4(),
+      agentId,
+      type,
+      content,
+      importance: importance ?? this.assessImportance(content, type),
+      timestamp: new Date().toISOString(),
+      contextId,
+      isShared: true,
+      metadata,
+    };
+
+    // Add to agent's memory
+    await this.addMemory(agentId, entry);
+
+    // Also store in context-specific storage
+    const contextMemories = await this.getMemoriesByContext(contextId);
+    contextMemories.push(entry);
+    
+    await fetch(`${API_BASE}/memory/set`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key: `global:context_memories:${contextId}`,
+        value: contextMemories,
+      }),
+    });
+
+    return entry;
+  }
+
+  /**
+   * Get contextual memories for building agent prompts (CrewAI-inspired)
+   */
+  static async buildContextualMemory(
+    agentId: string,
+    currentTask?: string,
+    contextId?: string
+  ): Promise<string> {
+    const memories = await this.getMemories(agentId);
+    const sharedMemories = await this.getSharedMemories(agentId);
+    let contextMemories: MemoryEntry[] = [];
+    
+    if (contextId) {
+      contextMemories = await this.getMemoriesByContext(contextId);
+    }
+
+    // Build context string
+    const contextParts: string[] = [];
+
+    // Add relevant personal memories
+    const relevantMemories = memories
+      .filter(m => m.importance >= 7 || (currentTask && m.content.toLowerCase().includes(currentTask.toLowerCase())))
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, 5);
+    
+    if (relevantMemories.length > 0) {
+      contextParts.push("## Personal Memory:");
+      relevantMemories.forEach(m => {
+        contextParts.push(`- ${m.content} (${m.type})`);
+      });
+    }
+
+    // Add shared memories
+    const relevantSharedMemories = sharedMemories
+      .filter(m => m.importance >= 6)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, 3);
+    
+    if (relevantSharedMemories.length > 0) {
+      contextParts.push("\n## Shared Knowledge:");
+      relevantSharedMemories.forEach(m => {
+        const source = m.sourceAgentId ? ` (from Agent-${m.sourceAgentId})` : "";
+        contextParts.push(`- ${m.content}${source}`);
+      });
+    }
+
+    // Add context-specific memories
+    if (contextMemories.length > 0) {
+      contextParts.push("\n## Collaboration Context:");
+      contextMemories
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+        .slice(0, 5)
+        .forEach(m => {
+          contextParts.push(`- ${m.content} (by Agent-${m.agentId})`);
+        });
+    }
+
+    return contextParts.join("\n");
+  }
+
+  /**
+   * Share insights with other agents based on recent experiences
+   */
+  static async shareInsights(
+    agentId: string,
+    targetAgentIds: string[],
+    topic: string
+  ): Promise<MemoryEntry[]> {
+    const memories = await this.getMemories(agentId);
+    
+    // Find memories related to the topic
+    const relevantMemories = memories.filter(m => 
+      m.content.toLowerCase().includes(topic.toLowerCase()) &&
+      m.importance >= 6 &&
+      !m.isShared // Don't re-share already shared memories
+    );
+
+    const sharedInsights: MemoryEntry[] = [];
+
+    for (const memory of relevantMemories.slice(0, 3)) { // Limit to top 3 insights
+      const insight = await this.addSharedMemory(agentId, {
+        type: "cross_agent_insight",
+        content: `Insight about ${topic}: ${memory.content}`,
+        importance: memory.importance,
+        sharedWith: targetAgentIds,
+        metadata: { 
+          originalMemoryId: memory.id,
+          topic,
+          shared: true
+        }
+      });
+      
+      if (insight) {
+        sharedInsights.push(insight);
+      }
+    }
+
+    return sharedInsights;
   }
 
   /**

@@ -13,6 +13,7 @@ import LogsPage from "./pages/logs";
 import MCPServersPage from "./pages/mcp-servers";
 import NewMCPServerPage from "./pages/mcp-servers/new";
 import SettingsPage from "./pages/settings";
+import CollaborationPage from "./pages/collaboration";
 import { useEffect } from "react";
 import { A2ACommunication } from "./lib/a2a-communication";
 import { AgentMemory } from "./lib/agent-memory";
@@ -57,6 +58,7 @@ const App = () => {
                 <Route path="/logs" element={<LogsPage />} />
                 <Route path="/mcp-servers" element={<MCPServersPage />} />
                 <Route path="/mcp-servers/new" element={<NewMCPServerPage />} />
+                <Route path="/collaboration" element={<CollaborationPage />} />
                 <Route path="/settings" element={<SettingsPage />} />
                 <Route path="*" element={<NotFound />} />
               </Routes>

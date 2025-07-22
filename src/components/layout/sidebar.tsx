@@ -10,6 +10,7 @@ import {
   ScrollText,
   Menu,
   X,
+  Network,
 } from "lucide-react";
 import { useState } from "react";
 
@@ -78,6 +79,11 @@ export function MainSidebar() {
       title: "Crews",
       href: "/crews",
       icon: <Users className="mr-2 h-4 w-4" />,
+    },
+    {
+      title: "Collaboration",
+      href: "/collaboration",
+      icon: <Network className="mr-2 h-4 w-4" />,
     },
     {
       title: "MCP Servers",
