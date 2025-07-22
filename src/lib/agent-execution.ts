@@ -133,18 +133,126 @@ export class AgentExecution {
   static async sendMessage(
     agentId: string,
     message: string,
-    onThoughtStep?: (step: string) => void
+    onThoughtStep?: (step: string) => void,
+    depth: number = 0, // recursion depth for A2A
+    maxDepth: number = 2 // user-configurable max depth
   ): Promise<AgentMessage> {
+    if (depth > maxDepth) {
+      // Summarize the conversation so far using the LLM
+      const conversation = await this.getConversation(agentId);
+      // Fetch agent details if not already available
+      let agentObj = null;
+      try {
+        const agentRes = await fetch(`/api/agents/${agentId}`);
+        if (agentRes.ok) agentObj = await agentRes.json();
+      } catch {}
+      if (!agentObj) {
+        return {
+          role: "agent",
+          content: `The agent-to-agent conversation has reached the current max depth (${maxDepth}), but a summary could not be generated due to missing agent context.`,
+          timestamp: new Date().toISOString(),
+        };
+      }
+      // Convert conversation.messages to system role context
+      const contextForSummary = conversation.messages.slice(-10).map((m) => ({
+        role: "system" as const,
+        content: `${m.role}: ${m.content}`,
+        timestamp: m.timestamp,
+      }));
+      const summaryPrompt = `The agent-to-agent conversation has reached the current max depth (${maxDepth}). Please summarize what has occurred in the conversation so far, including the main points, actions taken, and any unresolved issues or next steps for the user.`;
+      const summary = await this.generateAgentResponse(
+        agentObj,
+        summaryPrompt +
+          "\n\nConversation history:\n" +
+          conversation.messages
+            .map((m) => `${m.role}: ${m.content}`)
+            .join("\n"),
+        contextForSummary
+      );
+      return {
+        role: "agent",
+        content: summary,
+        timestamp: new Date().toISOString(),
+      };
+    }
     try {
       // Get agent details
       const agentRes = await fetch(`/api/agents/${agentId}`);
-      if (!agentRes.ok) throw new Error("Agent not found");
+      if (!agentRes.ok) {
+        // Return a user-friendly error message instead of throwing
+        return {
+          role: "agent",
+          content: `Error: Agent with ID '${agentId}' not found. Please check the agent ID and try again.`,
+          timestamp: new Date().toISOString(),
+        };
+      }
       const agent: Agent = await agentRes.json();
 
       // Get full conversation for context and chat history
       const conversation = await this.getConversation(agentId);
       const chatHistory = conversation.messages || [];
-      const recentMessages = chatHistory.slice(-10);
+      // Fetch A2A logs for this agent
+      let a2aLog: any[] = [];
+      try {
+        const res = await fetch("/api/memory/get/a2a:messages");
+        const data = await res.json();
+        a2aLog = Array.isArray(data.value)
+          ? data.value
+          : data.value
+          ? [data.value]
+          : [];
+      } catch {}
+      // Only include A2A messages where this agent is sender or receiver
+      const agentA2ALog = a2aLog.filter(
+        (msg) => msg.from === agentId || msg.to === agentId
+      );
+      // Fetch recent A2A-related memories
+      let a2aMemories: any[] = [];
+      try {
+        a2aMemories = (await AgentMemory.getMemories(agentId)).filter(
+          (m) => m.type === "message_received" || m.type === "observation"
+        );
+      } catch {}
+      // Merge last N chat messages and last N A2A log entries for context
+      const N = 10;
+      // Format context messages for LLM
+      const formattedChat = chatHistory.slice(-N).map((msg) => {
+        if (msg.role === "user") return `User: ${msg.content}`;
+        if (msg.role === "agent") return `Agent [${agentId}]: ${msg.content}`;
+        return `${msg.role}: ${msg.content}`;
+      });
+      const formattedA2A = agentA2ALog.slice(-N).map((msg) => {
+        const from =
+          msg.from === agentId
+            ? `Agent [${agentId}]`
+            : `A2A from [${msg.from}]`;
+        return `${from}: ${msg.message}`;
+      });
+      const formattedMemories = a2aMemories
+        .slice(-N)
+        .map((m) => `Memory (${m.type}): ${m.content}`);
+      // Add a section for recent A2A interactions
+      const a2aSection =
+        formattedA2A.length > 0
+          ? ["## Recent A2A Interactions:", ...formattedA2A]
+          : [];
+      // Add a section for recent A2A memories
+      const memorySection =
+        formattedMemories.length > 0
+          ? ["## Recent A2A Memories:", ...formattedMemories]
+          : [];
+      // Compose the final context for the LLM
+      const recentMessages: {
+        role: "system";
+        content: string;
+        timestamp: string;
+      }[] = [...formattedChat, ...a2aSection, ...memorySection].map(
+        (content) => ({
+          role: "system" as const,
+          content,
+          timestamp: new Date().toISOString(),
+        })
+      );
 
       // Create user message
       const userMsg: AgentMessage = {
@@ -152,17 +260,19 @@ export class AgentExecution {
         content: message,
         timestamp: new Date().toISOString(),
       };
-      // Append user message to chat history
-      const updatedChat = [...chatHistory, userMsg];
-      // Save updated chat array to backend
-      await fetch(`/api/memory/set`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          key: `agent:${agentId}:chat`,
-          value: updatedChat,
-        }),
-      });
+      // Append user message to chat history and save only if user-initiated (depth === 0)
+      let updatedChat = chatHistory;
+      if (depth === 0) {
+        updatedChat = [...chatHistory, userMsg];
+        await fetch(`/api/memory/set`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            key: `agent:${agentId}:chat`,
+            value: updatedChat,
+          }),
+        });
+      }
       // Also add to short-term memory
       await AgentMemory.addMemory(agentId, {
         type: "user_message",
@@ -172,40 +282,39 @@ export class AgentExecution {
 
       if (onThoughtStep) onThoughtStep("Retrieving context and reasoning...");
 
-      // Generate agent response using AI service and real context
+      // Main tool call execution loop
       let agentResponseContent = await this.generateAgentResponse(
         agent,
         message,
         recentMessages
       );
-
-      // Try to parse for tool call
       let toolCall: ToolCall | null = null;
       let triedCorrection = false;
-      while (true) {
+      let finalAgentMessage: AgentMessage | null = null;
+      let loopCount = 0;
+      let currentMessage = message;
+      let currentContext = [...recentMessages];
+      while (loopCount < 5) {
+        // prevent infinite loops
+        loopCount++;
+        // Try to parse for tool call
+        toolCall = null;
         try {
           const parsed = JSON.parse(agentResponseContent);
           if (parsed && typeof parsed === "object" && parsed.tool_call) {
             toolCall = parsed as ToolCall;
-            break;
           }
         } catch {}
-        if (triedCorrection) break;
-        // If not valid, re-prompt the LLM with a correction message
-        if (onThoughtStep)
-          onThoughtStep(
-            "Response was not a valid tool call. Re-prompting for correct JSON tool call..."
-          );
-        agentResponseContent = await this.generateAgentResponse(
-          agent,
-          `Your previous response was not a valid tool call. You must respond with a valid JSON object with a tool_call field if a tool is needed. Do not describe tool usage in natural language. Original message: ${message}`,
-          recentMessages
-        );
-        triedCorrection = true;
-      }
-
-      // If tool call detected, handle it with approval workflow
-      if (toolCall && agentToolRegistry[toolCall.tool_call]) {
+        if (!toolCall) {
+          // No tool call, treat as final agent response
+          finalAgentMessage = {
+            role: "agent",
+            content: agentResponseContent,
+            timestamp: new Date().toISOString(),
+          };
+          break;
+        }
+        // Execute the tool call
         if (onThoughtStep)
           onThoughtStep(`Tool call detected: ${toolCall.tool_call}`);
         const toolRequiresApproval = this.doesToolRequireApproval(
@@ -221,101 +330,162 @@ export class AgentExecution {
             context: recentMessages,
             timestamp: new Date().toISOString(),
           });
-          agentResponseContent = `I need to use the tool \"${
+          agentResponseContent = `I need to use the tool "$${
             toolCall.tool_call
-          }\" with arguments: ${JSON.stringify(
-            toolCall.args,
-            null,
-            2
-          )}.\n\nThis tool requires your approval before I can proceed. Please review and approve/reject this tool usage.`;
-        } else {
-          if (onThoughtStep)
-            onThoughtStep(`Executing tool: ${toolCall.tool_call}`);
-          try {
-            const toolResult: ToolResult = await agentToolRegistry[
+          }" with arguments: ${JSON.stringify(toolCall.args, null, 2)}.
+\n\nThis tool requires your approval before I can proceed. Please review and approve/reject this tool usage.`;
+          finalAgentMessage = {
+            role: "agent",
+            content: agentResponseContent,
+            timestamp: new Date().toISOString(),
+          };
+          break;
+        }
+        if (onThoughtStep)
+          onThoughtStep(`Executing tool: ${toolCall.tool_call}`);
+        try {
+          const toolResult: ToolResult = await agentToolRegistry[
+            toolCall.tool_call
+          ](toolCall.args || {}, { agent });
+          await this.logToolExecution(
+            agent.id,
+            toolCall,
+            toolResult,
+            "success"
+          );
+          await AgentMemory.addMemory(agent.id, {
+            type: "observation",
+            content: `Tool ${
               toolCall.tool_call
-            ](toolCall.args || {}, { agent });
-            await this.logToolExecution(
-              agent.id,
-              toolCall,
-              toolResult,
-              "success"
+            } executed. Result: ${JSON.stringify(toolResult.result)}`,
+            importance: 7,
+          });
+          // Special handling for SEND_MESSAGE: actually call the receiving agent's LLM
+          if (
+            toolCall.tool_call === "SEND_MESSAGE" &&
+            toolCall.args &&
+            toolCall.args.to_id &&
+            toolCall.args.message
+          ) {
+            if (onThoughtStep)
+              onThoughtStep(
+                `Triggering receiving agent (${toolCall.args.to_id}) to process message...`
+              );
+            // Call the receiving agent's LLM as if receiving a user message, incrementing depth and passing maxDepth
+            const responseFromOtherAgent = await this.sendMessage(
+              toolCall.args.to_id,
+              toolCall.args.message,
+              onThoughtStep,
+              depth + 1,
+              maxDepth
             );
-            // Log tool result in memory
-            await AgentMemory.addMemory(agent.id, {
-              type: "observation",
-              content: `Tool ${
-                toolCall.tool_call
-              } executed. Result: ${JSON.stringify(toolResult.result)}`,
-              importance: 7,
-            });
-            // Inject tool result as a system message and re-prompt LLM
-            const toolResultMsg: AgentMessage = {
-              role: "system",
-              content: JSON.stringify(toolResult),
+            // Use the LLM to summarize what occurred
+            const summaryPrompt = `You just sent a message to agent ${toolCall.args.to_id} with the content: "${toolCall.args.message}". They replied: "${responseFromOtherAgent.content}". Please summarize this interaction for the user, reflecting on what happened and what the next steps might be. Do not initiate another agent-to-agent message in response to a received message unless specifically instructed by the user. Conclude the conversation once your goal is accomplished or you have responded to the other agent.`;
+            const summary = await this.generateAgentResponse(
+              agent,
+              summaryPrompt,
+              currentContext
+            );
+            finalAgentMessage = {
+              role: "agent",
+              content: summary,
               timestamp: new Date().toISOString(),
             };
-            const newContext: AgentMessage[] = [
-              ...recentMessages,
-              userMsg,
-              toolResultMsg,
-            ];
-            agentResponseContent = await this.generateAgentResponse(
-              agent,
-              message,
-              newContext
-            );
-          } catch (toolError) {
-            await this.logToolExecution(
-              agent.id,
-              toolCall,
-              null,
-              "error",
-              toolError instanceof Error ? toolError.message : "Unknown error"
-            );
-            if (onThoughtStep)
-              onThoughtStep(`Tool execution failed: ${toolError}`);
-            agentResponseContent = `I encountered an error while using the ${
-              toolCall.tool_call
-            } tool: ${
-              toolError instanceof Error ? toolError.message : "Unknown error"
-            }. Let me try a different approach.`;
+            // Only break if we've reached maxDepth, otherwise continue the loop
+            if (depth + 1 >= maxDepth) {
+              break;
+            } else {
+              // Prepare for next loop iteration: update currentMessage and context
+              const nextPrompt = `You just received this reply from agent ${toolCall.args.to_id}: "${responseFromOtherAgent.content}". What would you like to do next for the user's goal? Continue the agent-to-agent conversation up to the max depth (${maxDepth}) unless the user says to stop.`;
+              currentMessage = nextPrompt;
+              currentContext = [
+                ...currentContext,
+                {
+                  role: "system" as const,
+                  content: nextPrompt,
+                  timestamp: new Date().toISOString(),
+                },
+              ];
+              agentResponseContent = await this.generateAgentResponse(
+                agent,
+                currentMessage,
+                currentContext
+              );
+              continue;
+            }
           }
+          // For other tools, inject tool result as a system message and re-prompt LLM
+          const toolResultMsg = {
+            role: "system" as const,
+            content: JSON.stringify(toolResult),
+            timestamp: new Date().toISOString(),
+          };
+          currentContext = [...currentContext, toolResultMsg];
+          agentResponseContent = await this.generateAgentResponse(
+            agent,
+            currentMessage,
+            currentContext
+          );
+          // Continue the loop to check if the new response is a tool call
+          continue;
+        } catch (toolError) {
+          await this.logToolExecution(
+            agent.id,
+            toolCall,
+            null,
+            "error",
+            toolError instanceof Error ? toolError.message : "Unknown error"
+          );
+          if (onThoughtStep)
+            onThoughtStep(`Tool execution failed: ${toolError}`);
+          agentResponseContent = `I encountered an error while using the ${
+            toolCall.tool_call
+          } tool: ${
+            toolError instanceof Error ? toolError.message : "Unknown error"
+          }. Let me try a different approach.`;
+          // Continue the loop to see if the next response is a tool call
+          continue;
         }
       }
-
-      // Create agent response message
-      const agentMessage: AgentMessage = {
-        role: "agent",
-        content: agentResponseContent,
-        timestamp: new Date().toISOString(),
-      };
-      // Append agent response to chat history
-      const finalChat = [...updatedChat, agentMessage];
-      // Save updated chat array to backend
-      await fetch(`/api/memory/set`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          key: `agent:${agentId}:chat`,
-          value: finalChat,
-        }),
-      });
-      // Also add to short-term memory
-      await AgentMemory.addMemory(agentId, {
-        type: "agent_response",
-        content: agentResponseContent,
-        importance: 6,
-      });
-
-      return agentMessage;
+      // After loop, log and return the final agent message
+      if (finalAgentMessage) {
+        // Only save agent response to chat if user-initiated (depth === 0)
+        if (depth === 0) {
+          const finalChat = [...updatedChat, finalAgentMessage];
+          await fetch(`/api/memory/set`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              key: `agent:${agentId}:chat`,
+              value: finalChat,
+            }),
+          });
+        }
+        await AgentMemory.addMemory(agentId, {
+          type: "agent_response",
+          content: finalAgentMessage.content,
+          importance: 6,
+        });
+        return finalAgentMessage;
+      } else {
+        throw new Error(
+          "Failed to get a valid agent response after tool execution loop."
+        );
+      }
     } catch (error) {
       console.error("Error sending message to agent:", error);
       if (onThoughtStep)
         onThoughtStep(
           "Error: " + (error instanceof Error ? error.message : error)
         );
-      throw error;
+      // Return a user-friendly error message
+      return {
+        role: "agent",
+        content: `An error occurred while sending the message: ${
+          error instanceof Error ? error.message : error
+        }`,
+        timestamp: new Date().toISOString(),
+      };
     }
   }
 
@@ -513,10 +683,15 @@ export class AgentExecution {
       const recentMessages = conversation.messages.slice(-10);
 
       // Generate response using AI service and real context
+      const contextForTask = recentMessages.map((m) => ({
+        role: "system" as const,
+        content: `${m.role}: ${m.content}`,
+        timestamp: m.timestamp,
+      }));
       const agentRes = await this.generateAgentResponse(
         agent,
         task,
-        recentMessages
+        contextForTask
       );
 
       // Add result to agent memory
@@ -550,7 +725,11 @@ export class AgentExecution {
   private static async generateAgentResponse(
     agent: Agent | null,
     message: string,
-    contextMessages: AgentMessage[] = []
+    contextMessages: {
+      role: "system";
+      content: string;
+      timestamp: string;
+    }[] = []
   ): Promise<string> {
     if (!agent) {
       throw new Error("Agent not found or unavailable.");
@@ -574,13 +753,10 @@ export class AgentExecution {
       // Add previous messages
       aiMessages.push(
         ...contextMessages.map((msg) => {
-          const convertedRole =
-            msg.role === "agent"
-              ? "assistant"
-              : (msg.role as "system" | "user" | "assistant");
           return {
-            role: convertedRole,
+            role: msg.role,
             content: msg.content,
+            timestamp: msg.timestamp,
           };
         })
       );
@@ -588,6 +764,7 @@ export class AgentExecution {
       aiMessages.push({
         role: "user",
         content: message,
+        timestamp: new Date().toISOString(),
       });
 
       // Generate response using AI service
@@ -687,6 +864,13 @@ export class AgentExecution {
     const agentRes = await fetch(`/api/agents/${agentId}`);
     if (!agentRes.ok) return;
     const agent: Agent = await agentRes.json();
+    const contextForSessionSummary = conversation.messages
+      .slice(-10)
+      .map((m) => ({
+        role: "system" as const,
+        content: `${m.role}: ${m.content}`,
+        timestamp: m.timestamp,
+      }));
     const summary = await this.generateAgentResponse(
       agent,
       summaryPrompt +
@@ -694,7 +878,7 @@ export class AgentExecution {
         conversation.messages.map((m) => `${m.role}: ${m.content}`).join("\n") +
         "\n\nMemories:\n" +
         memories.map((m) => `- ${m.content}`).join("\n"),
-      conversation.messages.slice(-10)
+      contextForSessionSummary
     );
     // Store summary in long-term memory
     await AgentMemory.setFact(agentId, "session_summary", summary);

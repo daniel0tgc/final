@@ -247,7 +247,7 @@ async function logA2AMessage(entry: any) {
 
 // Tool: Send a message to another agent and trigger their response
 export const sendMessageTool: ToolHandler = async (args, context) => {
-  const { to_id, message } = args;
+  const { to_id, message, depth = 1, maxDepth = 2 } = args;
   if (!to_id || !message) throw new Error("to_id and message are required");
 
   const timestamp = new Date().toISOString();
@@ -278,7 +278,13 @@ export const sendMessageTool: ToolHandler = async (args, context) => {
   });
 
   // Trigger the receiving agent to process the message as a user message
-  const response = await AgentExecution.sendMessage(to_id, message);
+  const response = await AgentExecution.sendMessage(
+    to_id,
+    message,
+    undefined,
+    depth,
+    maxDepth
+  );
 
   // Log the response in the A2A log as well
   const responseEntry = {
@@ -299,7 +305,7 @@ export const sendMessageTool: ToolHandler = async (args, context) => {
 
 // Tool: Receive a message (for agent to process incoming messages)
 export const receiveMessageTool: ToolHandler = async (args, context) => {
-  const { from_id, message } = args;
+  const { from_id, message, depth = 1, maxDepth = 2 } = args;
   if (!from_id || !message) throw new Error("from_id and message are required");
 
   const timestamp = new Date().toISOString();
@@ -322,7 +328,13 @@ export const receiveMessageTool: ToolHandler = async (args, context) => {
   });
 
   // Process the message as a user message for the receiving agent
-  const response = await AgentExecution.sendMessage(context.agent.id, message);
+  const response = await AgentExecution.sendMessage(
+    context.agent.id,
+    message,
+    undefined,
+    depth,
+    maxDepth
+  );
 
   // Log the response in the A2A log as well
   const responseEntry = {

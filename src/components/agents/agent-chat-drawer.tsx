@@ -9,7 +9,16 @@ import {
 } from "@/components/ui/drawer";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Bot, Send, X, User, Loader2, CheckCircle, XCircle, Clock } from "lucide-react";
+import {
+  Bot,
+  Send,
+  X,
+  User,
+  Loader2,
+  CheckCircle,
+  XCircle,
+  Clock,
+} from "lucide-react";
 import { Agent } from "@/types";
 import { AgentExecution, AgentMessage } from "@/lib/agent-execution";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -37,6 +46,7 @@ export function AgentChatDrawer({
   const [loading, setLoading] = useState(false);
   const [pendingApprovals, setPendingApprovals] = useState<any[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [maxDepth, setMaxDepth] = useState(2);
 
   // Load conversation when agent changes or drawer opens
   useEffect(() => {
@@ -64,37 +74,51 @@ export function AgentChatDrawer({
   // Load pending approvals for this agent
   const loadPendingApprovals = async () => {
     if (!agent) return;
-    
+
     try {
-      const response = await fetch(`/api/approvals/pending?agentId=${agent.id}`);
+      const response = await fetch(
+        `/api/approvals/pending?agentId=${agent.id}`
+      );
       if (response.ok) {
         const approvals = await response.json();
         setPendingApprovals(approvals);
       }
     } catch (error) {
-      console.error('Failed to load pending approvals:', error);
+      console.error("Failed to load pending approvals:", error);
     }
   };
 
   // Handle tool approval
-  const handleToolApproval = async (approvalId: string, approved: boolean, reason?: string) => {
+  const handleToolApproval = async (
+    approvalId: string,
+    approved: boolean,
+    reason?: string
+  ) => {
     try {
-      const result = await AgentExecution.approveToolCall(approvalId, approved, reason);
-      
+      const result = await AgentExecution.approveToolCall(
+        approvalId,
+        approved,
+        reason
+      );
+
       if (result.success) {
         // Remove from pending approvals
-        setPendingApprovals(prev => prev.filter(approval => approval.id !== approvalId));
-        
+        setPendingApprovals((prev) =>
+          prev.filter((approval) => approval.id !== approvalId)
+        );
+
         // Refresh conversation to show updated results
         if (agent) {
-          const agentConversation = await AgentExecution.getConversation(agent.id);
+          const agentConversation = await AgentExecution.getConversation(
+            agent.id
+          );
           setConversation(
             agentConversation.messages.filter((msg) => msg.role !== "system")
           );
         }
       }
     } catch (error) {
-      console.error('Failed to process approval:', error);
+      console.error("Failed to process approval:", error);
     }
   };
 
@@ -124,7 +148,9 @@ export function AgentChatDrawer({
       const response = await AgentExecution.sendMessage(
         agent.id,
         userMessage,
-        (step) => setThoughtSteps((prev) => [...prev, step])
+        (step) => setThoughtSteps((prev) => [...prev, step]),
+        0,
+        maxDepth
       );
       setConversation((prev) => [...prev, response]);
       setThoughtSteps([]);
@@ -150,6 +176,19 @@ export function AgentChatDrawer({
 
   if (!open) return null;
 
+  const lastAgentMsg = [...conversation]
+    .reverse()
+    .find((m) => m.role === "agent");
+  const lastUserMsg = [...conversation]
+    .reverse()
+    .find((m) => m.role === "user");
+  const showContinueButton =
+    lastAgentMsg &&
+    typeof lastAgentMsg.content === "string" &&
+    lastAgentMsg.content.includes("has reached the current max depth") &&
+    lastUserMsg &&
+    !isAgentResponding;
+
   return (
     <div className="fixed inset-0 z-50 flex">
       {/* Overlay */}
@@ -170,11 +209,28 @@ export function AgentChatDrawer({
             <Button
               size="sm"
               variant="outline"
-              onClick={() => setShowThoughts((v) => !v)}
               className="ml-2"
+              onClick={() => setShowThoughts((v) => !v)}
             >
               {showThoughts ? "Hide Thoughts" : "Show Thoughts"}
             </Button>
+            <div className="flex items-center gap-2 ml-4 bg-gray-50 border border-gray-200 px-2 py-1 rounded">
+              <label htmlFor="maxDepth" className="text-xs text-gray-500">
+                Max A2A Depth:
+              </label>
+              <input
+                id="maxDepth"
+                type="number"
+                min={1}
+                max={10}
+                value={maxDepth}
+                onChange={(e) => setMaxDepth(Number(e.target.value))}
+                className="w-16 border rounded px-1 py-0.5 text-xs"
+              />
+              <span className="text-xs text-gray-400">
+                (Current: {maxDepth})
+              </span>
+            </div>
           </div>
           <Button
             variant="ghost"
@@ -204,26 +260,44 @@ export function AgentChatDrawer({
                         Pending Tool Approvals ({pendingApprovals.length})
                       </h4>
                       {pendingApprovals.map((approval) => (
-                        <Card key={approval.id} className="border-orange-200 bg-orange-50">
+                        <Card
+                          key={approval.id}
+                          className="border-orange-200 bg-orange-50"
+                        >
                           <CardHeader className="pb-2">
                             <CardTitle className="text-sm flex items-center justify-between">
                               <span>Tool: {approval.toolCall.tool_call}</span>
-                              <Badge variant="outline" className="text-orange-600">
+                              <Badge
+                                variant="outline"
+                                className="text-orange-600"
+                              >
                                 Pending Approval
                               </Badge>
                             </CardTitle>
                           </CardHeader>
                           <CardContent className="space-y-3">
                             <div>
-                              <p className="text-xs font-medium text-gray-600 mb-1">Arguments:</p>
+                              <p className="text-xs font-medium text-gray-600 mb-1">
+                                Arguments:
+                              </p>
                               <pre className="text-xs bg-white p-2 rounded border overflow-x-auto">
-                                {JSON.stringify(approval.toolCall.args, null, 2)}
+                                {JSON.stringify(
+                                  approval.toolCall.args,
+                                  null,
+                                  2
+                                )}
                               </pre>
                             </div>
                             <div className="flex gap-2">
                               <Button
                                 size="sm"
-                                onClick={() => handleToolApproval(approval.id, true, 'Approved by user')}
+                                onClick={() =>
+                                  handleToolApproval(
+                                    approval.id,
+                                    true,
+                                    "Approved by user"
+                                  )
+                                }
                                 className="bg-green-600 hover:bg-green-700"
                               >
                                 <CheckCircle className="h-4 w-4 mr-1" />
@@ -232,7 +306,13 @@ export function AgentChatDrawer({
                               <Button
                                 size="sm"
                                 variant="outline"
-                                onClick={() => handleToolApproval(approval.id, false, 'Rejected by user')}
+                                onClick={() =>
+                                  handleToolApproval(
+                                    approval.id,
+                                    false,
+                                    "Rejected by user"
+                                  )
+                                }
                                 className="border-red-500 text-red-600 hover:bg-red-50"
                               >
                                 <XCircle className="h-4 w-4 mr-1" />
@@ -289,6 +369,54 @@ export function AgentChatDrawer({
                       </div>
                     </div>
                   ))}
+                  {showContinueButton && (
+                    <div className="flex justify-center mt-4">
+                      <Button
+                        variant="default"
+                        onClick={async () => {
+                          const newDepth = maxDepth + 1;
+                          setMaxDepth(newDepth);
+                          setIsAgentResponding(true);
+                          setThoughtSteps(["Continuing conversation..."]);
+                          try {
+                            if (
+                              lastUserMsg &&
+                              typeof lastUserMsg.content === "string"
+                            ) {
+                              const response = await AgentExecution.sendMessage(
+                                agent.id,
+                                lastUserMsg.content,
+                                (step) =>
+                                  setThoughtSteps((prev) => [...prev, step]),
+                                0,
+                                newDepth
+                              );
+                              setConversation((prev) => [...prev, response]);
+                              setThoughtSteps([]);
+                            }
+                          } catch (error) {
+                            setConversation((prev) => [
+                              ...prev,
+                              {
+                                role: "agent",
+                                content:
+                                  "Sorry, I encountered an error continuing the conversation.",
+                                timestamp: new Date().toISOString(),
+                              },
+                            ]);
+                            setThoughtSteps([
+                              "Error occurred while continuing.",
+                            ]);
+                          } finally {
+                            setIsAgentResponding(false);
+                          }
+                        }}
+                        disabled={isAgentResponding}
+                      >
+                        Continue Conversation
+                      </Button>
+                    </div>
+                  )}
                   {isAgentResponding && (
                     <div className="flex flex-col items-start gap-2 p-3 rounded-lg bg-secondary">
                       <Loader2 size={16} className="animate-spin" />

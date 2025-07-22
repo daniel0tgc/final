@@ -110,11 +110,10 @@ export function A2ACommunicationView({
     return format(new Date(timestamp), "MMM d, h:mm a");
   };
 
-  // Find agent name by ID
-  const getAgentName = (agentId: string) => {
-    const agent = allAgents.find((a) => a.id === agentId);
-    return agent ? agent.config.name : "Unknown Agent";
-  };
+  // Helper to get agent name from ID
+  function getAgentName(agentId: string, allAgents: any[]): string {
+    return allAgents.find((a) => a.id === agentId)?.config.name || agentId;
+  }
 
   return (
     <Card className="h-[600px] flex flex-col">
@@ -184,85 +183,33 @@ export function A2ACommunicationView({
             </div>
           ) : messages.length > 0 ? (
             <div className="p-4 space-y-4">
-              {messages.map((message) => (
+              {messages.map((msg) => (
                 <div
-                  key={message.id}
-                  className={`p-3 border rounded-md ${
-                    message.status === "error"
-                      ? "border-red-300 bg-red-50"
-                      : message.sourceAgentId === agent.id
-                      ? "border-blue-100"
-                      : ""
-                  }`}
+                  key={msg.timestamp + msg.from + msg.to + msg.direction}
+                  className="mb-2 p-2 border rounded-md"
                 >
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      {message.sourceAgentId === agent.id ? (
-                        <Badge
-                          variant="outline"
-                          className="bg-blue-50 text-blue-800 border-blue-200 flex items-center gap-1"
-                        >
-                          <ArrowUpIcon size={12} />
-                          Sent
-                        </Badge>
-                      ) : (
-                        <Badge
-                          variant="outline"
-                          className="bg-green-50 text-green-800 border-green-200 flex items-center gap-1"
-                        >
-                          <ArrowDownIcon size={12} />
-                          Received
-                        </Badge>
-                      )}
-
-                      {message.status !== "success" && (
-                        <Badge
-                          variant={
-                            message.status === "pending"
-                              ? "outline"
-                              : "destructive"
-                          }
-                        >
-                          {message.status}
-                        </Badge>
-                      )}
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-muted-foreground">
-                        {formatTime(message.timestamp)}
-                      </span>
-                      <button
-                        onClick={() => handleDeleteMessage(message.id)}
-                        className="text-muted-foreground hover:text-red-500 transition-colors"
-                      >
-                        <TrashIcon size={14} />
-                      </button>
-                    </div>
+                  <div className="text-xs text-gray-500 mb-1">
+                    <span className="font-semibold">
+                      {getAgentName(msg.from, allAgents)}
+                    </span>
+                    {msg.direction === "response"
+                      ? " responded to "
+                      : msg.direction === "sent"
+                      ? " sent to "
+                      : " to "}
+                    <span className="font-semibold">
+                      {getAgentName(msg.to, allAgents)}
+                    </span>
+                    <span className="ml-2">
+                      {new Date(msg.timestamp).toLocaleString()}
+                    </span>
                   </div>
-
-                  <div className="flex text-xs text-muted-foreground mb-2">
-                    <div className="flex-1">
-                      <strong>From:</strong>{" "}
-                      {message.sourceAgentName ||
-                        getAgentName(message.sourceAgentId)}
-                    </div>
-                    <div className="flex-1">
-                      <strong>To:</strong>{" "}
-                      {message.targetAgentName ||
-                        getAgentName(message.targetAgentId)}
-                    </div>
+                  <div className="text-sm whitespace-pre-line">
+                    {msg.message}
                   </div>
-
-                  <p className="text-sm whitespace-pre-wrap border-l-2 pl-3 my-2 border-muted">
-                    {message.message}
-                  </p>
-
-                  {message.error && (
-                    <p className="text-xs text-red-500 mt-1">
-                      Error: {message.error}
-                    </p>
-                  )}
+                  <div className="text-xs text-gray-400 mt-1">
+                    {msg.direction}
+                  </div>
                 </div>
               ))}
             </div>
@@ -279,7 +226,10 @@ export function A2ACommunicationView({
               <p className="text-sm mt-1">
                 {selectedAgentId === "all"
                   ? "This agent hasn't communicated with other agents yet"
-                  : `No communication with ${getAgentName(selectedAgentId)}`}
+                  : `No communication with ${getAgentName(
+                      selectedAgentId,
+                      allAgents
+                    )}`}
               </p>
             </div>
           )}

@@ -38,6 +38,9 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
   const [thoughtSteps, setThoughtSteps] = useState<string[]>([]);
   const [showThoughts, setShowThoughts] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [maxDepth, setMaxDepth] = useState(2);
+  const [lastUserMessage, setLastUserMessage] = useState<string | null>(null);
+  const [lastDepth, setLastDepth] = useState<number>(2);
 
   // Load conversation history when component mounts
   useEffect(() => {
@@ -78,16 +81,45 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
       setMessages((prev) => [...prev, userMsg]);
       setInputMessage("");
       setThoughtSteps((prev) => [...prev, "Checking for tool calls..."]);
+      setLastUserMessage(userMsg.content);
+      setLastDepth(maxDepth);
       // Send to agent and get response (with tool call detection)
       const response = await AgentExecution.sendMessage(
         agent.id,
         userMsg.content,
-        (step) => setThoughtSteps((prev) => [...prev, step])
+        (step) => setThoughtSteps((prev) => [...prev, step]),
+        0,
+        maxDepth
       );
       setMessages((prev) => [...prev, response]);
       setThoughtSteps([]);
     } catch (error) {
       setThoughtSteps(["Error occurred while processing."]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // Handler for 'Continue' button when maxDepth is reached
+  const handleContinue = async () => {
+    if (!lastUserMessage) return;
+    setIsLoading(true);
+    setThoughtSteps(["Continuing conversation..."]);
+    try {
+      const newDepth = lastDepth + 2;
+      setMaxDepth(newDepth);
+      setLastDepth(newDepth);
+      const response = await AgentExecution.sendMessage(
+        agent.id,
+        lastUserMessage,
+        (step) => setThoughtSteps((prev) => [...prev, step]),
+        0,
+        newDepth
+      );
+      setMessages((prev) => [...prev, response]);
+      setThoughtSteps([]);
+    } catch (error) {
+      setThoughtSteps(["Error occurred while continuing."]);
     } finally {
       setIsLoading(false);
     }
@@ -170,17 +202,23 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
   return (
     <Card className="flex flex-col h-[600px]">
       <CardHeader className="pb-2">
-        <div className="flex justify-between items-center">
+        <div className="flex items-center justify-between gap-4 w-full">
           <CardTitle className="flex items-center gap-2">
             <Bot size={18} />
             <span>{agent.config.name}</span>
           </CardTitle>
-
+          <Button
+            size="sm"
+            className="mx-2 bg-gray-300 text-gray-800 hover:bg-gray-400 border-none shadow-none"
+            onClick={() => setShowThoughts((v) => !v)}
+          >
+            {showThoughts ? "Hide Thoughts" : "Show Thoughts"}
+          </Button>
           <Button
             variant={isActive ? "destructive" : "default"}
             size="sm"
             onClick={handleToggleAgent}
-            className="gap-1"
+            className="gap-1 ml-2"
           >
             {isActive ? (
               <>
@@ -194,6 +232,22 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
           </Button>
         </div>
       </CardHeader>
+      {/* Max Depth input row, always visible below header */}
+      <div className="w-full flex items-center gap-2 px-4 py-2 bg-gray-50 border-b border-gray-200">
+        <label htmlFor="maxDepth" className="text-xs text-gray-500">
+          Max A2A Depth:
+        </label>
+        <input
+          id="maxDepth"
+          type="number"
+          min={1}
+          max={10}
+          value={maxDepth}
+          onChange={(e) => setMaxDepth(Number(e.target.value))}
+          className="w-16 border rounded px-1 py-0.5 text-xs"
+        />
+        <span className="text-xs text-gray-400">(Current: {maxDepth})</span>
+      </div>
 
       <CardContent className="p-4 flex-grow overflow-hidden">
         <ScrollArea className="h-full pr-4">
@@ -205,7 +259,7 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
               </div>
             ) : (
               <>
-                <div className="flex justify-end">
+                <div className="flex justify-between items-center mb-2">
                   <Button
                     size="sm"
                     variant="outline"
@@ -288,6 +342,21 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
             )}
           </Button>
         </div>
+        {/* Show 'Continue' button if last message hit maxDepth */}
+        {messages.length > 0 &&
+          messages[messages.length - 1].content?.includes(
+            "has reached its current limit"
+          ) && (
+            <div className="my-2">
+              <button
+                onClick={handleContinue}
+                className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
+                disabled={isLoading}
+              >
+                Continue Conversation
+              </button>
+            </div>
+          )}
       </div>
 
       <CardFooter className="pt-0">
