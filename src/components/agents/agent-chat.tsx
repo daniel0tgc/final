@@ -49,7 +49,8 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
       try {
         const conversation = await AgentExecution.getConversation(agent.id);
         setMessages(conversation.messages.filter((m) => m.role !== "system"));
-        setIsActive(AgentExecution.isAgentActive(agent.id));
+        const active = await AgentExecution.isAgentActive(agent.id);
+        setIsActive(active);
       } catch (error) {
         setMessages([]);
       } finally {
@@ -300,6 +301,18 @@ export function AgentChat({ agent, onStatusChange }: AgentChatProps) {
                         </div>
                         <div className="whitespace-pre-wrap">
                           {message.content}
+                          {/* Tool call error feedback */}
+                          {message.content &&
+                            message.content.includes(
+                              "not valid JSON and could not be parsed"
+                            ) && (
+                              <div className="mt-2 p-2 bg-red-100 text-red-700 rounded text-xs">
+                                <b>Tool Call Error:</b> The agent tried to use a
+                                tool, but its response was not valid JSON and
+                                could not be parsed. Please try rephrasing your
+                                request or check the agent's configuration.
+                              </div>
+                            )}
                         </div>
                       </div>
                     </div>

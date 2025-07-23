@@ -1,7 +1,7 @@
 #!/bin/bash
 # Enhanced Platform Stop Script
 # Cleanly stops both enhanced and original systems
-# .stop-platform.sh
+# ./stop-platform.sh
 
 # Colors for output
 RED='\033[0;31m'

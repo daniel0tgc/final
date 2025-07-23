@@ -9,7 +9,7 @@ const app = express();
 const docker = new Docker();
 const redis = createClient();
 
-app.use(express.json());
+app.use(express.json({ limit: "35mb" }));
 
 // Connect to Redis
 redis.connect().catch(console.error);
@@ -165,6 +165,16 @@ app.get("/api/memory/get/:key", async (req, res) => {
   }
 });
 
+app.delete("/api/memory/delete/:key", async (req, res) => {
+  const { key } = req.params;
+  try {
+    await redis.del(key);
+    res.json({ status: "ok" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Endpoint to set a long-term fact for an agent
 app.post("/api/longterm/set", async (req, res) => {
   const { agentId, key, value } = req.body;
@@ -208,9 +218,9 @@ app.post("/api/memory/set", async (req, res) => {
   const { key, value } = req.body;
   if (!key || value === undefined)
     return res.status(400).json({ error: "Missing key or value" });
-  
+
   try {
-    const valueStr = typeof value === 'string' ? value : JSON.stringify(value);
+    const valueStr = typeof value === "string" ? value : JSON.stringify(value);
     await redis.set(key, valueStr);
     res.json({ status: "ok" });
   } catch (err) {
@@ -226,7 +236,7 @@ app.get("/api/memory/get/:key", async (req, res) => {
     if (value === null) {
       return res.json({ value: null });
     }
-    
+
     try {
       const parsed = JSON.parse(value);
       res.json({ value: parsed });
@@ -242,8 +252,15 @@ app.get("/api/memory/get/:key", async (req, res) => {
 
 // Send message between agents
 app.post("/api/agents/message", async (req, res) => {
-  const { sourceAgentId, targetAgentId, message, messageType, priority, metadata } = req.body;
-  
+  const {
+    sourceAgentId,
+    targetAgentId,
+    message,
+    messageType,
+    priority,
+    metadata,
+  } = req.body;
+
   if (!sourceAgentId || !targetAgentId || !message) {
     return res.status(400).json({ error: "Missing required fields" });
   }
@@ -251,7 +268,7 @@ app.post("/api/agents/message", async (req, res) => {
   try {
     // Store message in Redis for real-time delivery
     const messageData = {
-      id: require('crypto').randomUUID(),
+      id: require("crypto").randomUUID(),
       sourceAgentId,
       targetAgentId,
       message,
@@ -259,12 +276,15 @@ app.post("/api/agents/message", async (req, res) => {
       priority: priority || "medium",
       timestamp: new Date().toISOString(),
       status: "pending",
-      metadata: metadata || {}
+      metadata: metadata || {},
     };
 
     // Add to target agent's message queue
-    await redis.lpush(`agent:${targetAgentId}:messages`, JSON.stringify(messageData));
-    
+    await redis.lpush(
+      `agent:${targetAgentId}:messages`,
+      JSON.stringify(messageData)
+    );
+
     // Also store in global message log
     const allMessages = await redis.get("a2a:messages");
     const messages = allMessages ? JSON.parse(allMessages) : [];
@@ -280,10 +300,10 @@ app.post("/api/agents/message", async (req, res) => {
 // Get agent messages
 app.get("/api/agents/:agentId/messages", async (req, res) => {
   const { agentId } = req.params;
-  
+
   try {
     const messages = await redis.lrange(`agent:${agentId}:messages`, 0, -1);
-    const parsedMessages = messages.map(msg => JSON.parse(msg));
+    const parsedMessages = messages.map((msg) => JSON.parse(msg));
     res.json(parsedMessages);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -307,12 +327,12 @@ app.get("/api/approvals/pending", async (req, res) => {
 app.post("/api/approvals/:id/process", async (req, res) => {
   const { id } = req.params;
   const { approved, reason, approverName } = req.body;
-  
+
   try {
     const pendingApprovals = await redis.get("pending_approvals");
     const approvals = pendingApprovals ? JSON.parse(pendingApprovals) : [];
-    
-    const approvalIndex = approvals.findIndex(a => a.id === id);
+
+    const approvalIndex = approvals.findIndex((a) => a.id === id);
     if (approvalIndex === -1) {
       return res.status(404).json({ error: "Approval request not found" });
     }
@@ -328,8 +348,8 @@ app.post("/api/approvals/:id/process", async (req, res) => {
       // Update task status in collaborative tasks
       const tasks = await redis.get("global:collaborative_tasks");
       const taskList = tasks ? JSON.parse(tasks) : [];
-      const taskIndex = taskList.findIndex(t => t.id === approval.itemId);
-      
+      const taskIndex = taskList.findIndex((t) => t.id === approval.itemId);
+
       if (taskIndex >= 0) {
         taskList[taskIndex].approvalStatus = approval.status;
         taskList[taskIndex].approvedBy = approverName;
@@ -708,17 +728,24 @@ ensureSystemLogsTable();
 // Create a new approval request
 app.post("/api/approvals", async (req, res) => {
   const { id, agentId, toolCall, context, status, timestamp } = req.body;
-  
+
   try {
     await pgPool.query(
-      `INSERT INTO tool_approvals (id, agent_id, tool_call, context, status, created_at) 
+      `INSERT INTO tool_approvals (id, agent_id, tool_call, context, status, created_at)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [id, agentId, toolCall, context, status || 'pending', timestamp || new Date().toISOString()]
+      [
+        id,
+        agentId,
+        toolCall,
+        context,
+        status || "pending",
+        timestamp || new Date().toISOString(),
+      ]
     );
-    
+
     res.json({ success: true, id });
   } catch (err) {
-    console.error('Failed to create approval:', err);
+    console.error("Failed to create approval:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -726,22 +753,22 @@ app.post("/api/approvals", async (req, res) => {
 // Get pending approvals for an agent
 app.get("/api/approvals/pending", async (req, res) => {
   const { agentId } = req.query;
-  
+
   try {
     let query = "SELECT * FROM tool_approvals WHERE status = 'pending'";
     let params = [];
-    
+
     if (agentId) {
       query += " AND agent_id = $1";
       params.push(agentId);
     }
-    
+
     query += " ORDER BY created_at DESC";
-    
+
     const result = await pgPool.query(query, params);
     res.json(result.rows);
   } catch (err) {
-    console.error('Failed to fetch pending approvals:', err);
+    console.error("Failed to fetch pending approvals:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -749,20 +776,20 @@ app.get("/api/approvals/pending", async (req, res) => {
 // Get specific approval
 app.get("/api/approvals/:id", async (req, res) => {
   const { id } = req.params;
-  
+
   try {
     const result = await pgPool.query(
       "SELECT * FROM tool_approvals WHERE id = $1",
       [id]
     );
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: "Approval not found" });
     }
-    
+
     res.json(result.rows[0]);
   } catch (err) {
-    console.error('Failed to fetch approval:', err);
+    console.error("Failed to fetch approval:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -771,36 +798,83 @@ app.get("/api/approvals/:id", async (req, res) => {
 app.put("/api/approvals/:id", async (req, res) => {
   const { id } = req.params;
   const { status, reason, result, processedAt } = req.body;
-  
+
   try {
     await pgPool.query(
-      `UPDATE tool_approvals 
-       SET status = $1, reason = $2, result = $3, processed_at = $4 
+      `UPDATE tool_approvals
+       SET status = $1, reason = $2, result = $3, processed_at = $4
        WHERE id = $5`,
       [status, reason, result, processedAt || new Date().toISOString(), id]
     );
-    
+
     res.json({ success: true });
   } catch (err) {
-    console.error('Failed to update approval:', err);
+    console.error("Failed to update approval:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // Log tool execution
 app.post("/api/logs/tools", async (req, res) => {
-  const { id, agentId, toolName, toolArgs, result, status, error, executionTime } = req.body;
-  
+  const {
+    id,
+    agentId,
+    toolName,
+    toolArgs,
+    result,
+    status,
+    error,
+    executionTime,
+  } = req.body;
+
+  // Debug: log the incoming request
+  console.log("/api/logs/tools request body:", req.body);
+
+  // Validate required fields
+  let logId = id;
+  if (!logId) {
+    // Auto-generate a UUID if not provided
+    logId = require("crypto").randomUUID();
+  }
+  if (!agentId || !toolName || !status) {
+    return res.status(400).json({
+      error:
+        "Missing required fields: agentId, toolName, and status are required.",
+    });
+  }
+
+  // Ensure toolArgs and result are valid JSON (default to null)
+  function safeJson(val) {
+    if (val === undefined || val === null) return null;
+    if (typeof val === "object") return val;
+    try {
+      return JSON.parse(val);
+    } catch {
+      return null;
+    }
+  }
+  const safeToolArgs = safeJson(toolArgs);
+  const safeResult = safeJson(result);
+
   try {
     await pgPool.query(
-      `INSERT INTO tool_logs (id, agent_id, tool_name, tool_args, result, status, error, execution_time) 
+      `INSERT INTO tool_logs (id, agent_id, tool_name, tool_args, result, status, error, execution_time)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [id, agentId, toolName, toolArgs, result, status, error, executionTime]
+      [
+        logId,
+        agentId,
+        toolName,
+        safeToolArgs,
+        safeResult,
+        status,
+        error,
+        executionTime,
+      ]
     );
-    
+
     res.json({ success: true });
   } catch (err) {
-    console.error('Failed to log tool execution:', err);
+    console.error("Failed to log tool execution:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -813,25 +887,34 @@ app.get("/api/logs/tools", async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error('Failed to fetch tool logs:', err);
+    console.error("Failed to fetch tool logs:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // Log system events
 app.post("/api/logs", async (req, res) => {
-  const { id, level, category, agentId, agentName, message, details, metadata } = req.body;
-  
+  const {
+    id,
+    level,
+    category,
+    agentId,
+    agentName,
+    message,
+    details,
+    metadata,
+  } = req.body;
+
   try {
     await pgPool.query(
-      `INSERT INTO system_logs (id, level, category, agent_id, agent_name, message, details, metadata) 
+      `INSERT INTO system_logs (id, level, category, agent_id, agent_name, message, details, metadata)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [id, level, category, agentId, agentName, message, details, metadata]
     );
-    
+
     res.json({ success: true });
   } catch (err) {
-    console.error('Failed to log system event:', err);
+    console.error("Failed to log system event:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -844,7 +927,7 @@ app.get("/api/logs", async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error('Failed to fetch system logs:', err);
+    console.error("Failed to fetch system logs:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -874,12 +957,23 @@ ensureA2ALogsTable();
 
 // Log A2A communication
 app.post("/api/logs/a2a", async (req, res) => {
-  const { 
-    id, timestamp, sourceAgentId, sourceAgentName, targetAgentId, targetAgentName,
-    messageType, priority, status, message, requiresApproval, approvalStatus,
-    contextId, taskId 
+  const {
+    id,
+    timestamp,
+    sourceAgentId,
+    sourceAgentName,
+    targetAgentId,
+    targetAgentName,
+    messageType,
+    priority,
+    status,
+    message,
+    requiresApproval,
+    approvalStatus,
+    contextId,
+    taskId,
   } = req.body;
-  
+
   try {
     await pgPool.query(
       `INSERT INTO a2a_logs (
@@ -888,15 +982,26 @@ app.post("/api/logs/a2a", async (req, res) => {
         context_id, task_id
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
       [
-        id, timestamp || new Date().toISOString(), sourceAgentId, sourceAgentName, 
-        targetAgentId, targetAgentName, messageType, priority, status, message,
-        requiresApproval || false, approvalStatus, contextId, taskId
+        id,
+        timestamp || new Date().toISOString(),
+        sourceAgentId,
+        sourceAgentName,
+        targetAgentId,
+        targetAgentName,
+        messageType,
+        priority,
+        status,
+        message,
+        requiresApproval || false,
+        approvalStatus,
+        contextId,
+        taskId,
       ]
     );
-    
+
     res.json({ success: true });
   } catch (err) {
-    console.error('Failed to log A2A communication:', err);
+    console.error("Failed to log A2A communication:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -909,7 +1014,7 @@ app.get("/api/logs/a2a", async (req, res) => {
     );
     res.json(result.rows);
   } catch (err) {
-    console.error('Failed to fetch A2A logs:', err);
+    console.error("Failed to fetch A2A logs:", err);
     res.status(500).json({ error: err.message });
   }
 });

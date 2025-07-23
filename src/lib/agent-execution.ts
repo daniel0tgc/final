@@ -2,10 +2,10 @@ import { v4 as uuidv4 } from "uuid";
 import { Agent } from "@/types";
 import { AgentMemory } from "./agent-memory";
 import { SharedVectorDB } from "./shared-vector-db";
-// Remove fs and path imports
 // Import agent_context.txt as a raw string
 import agentContext from "@/components/agents/agent_context.txt?raw";
 import { agentToolRegistry, ToolCall, ToolResult } from "./agent-tools";
+// Accurate token counting for OpenAI models (imported dynamically)
 
 // Agent Execution types
 export interface AgentMessage {
@@ -280,36 +280,109 @@ export class AgentExecution {
         importance: 5,
       });
 
-      if (onThoughtStep) onThoughtStep("Retrieving context and reasoning...");
+      if (onThoughtStep) onThoughtStep("Generating response with context...");
 
-      // Main tool call execution loop
+      // Main tool call execution loop with standard context
       let agentResponseContent = await this.generateAgentResponse(
         agent,
         message,
         recentMessages
       );
-      let toolCall: ToolCall | null = null;
-      let triedCorrection = false;
       let finalAgentMessage: AgentMessage | null = null;
+      // If the response does not contain 'tool_call', treat as normal agent response
+      if (!agentResponseContent.includes("tool_call")) {
+        finalAgentMessage = {
+          role: "agent",
+          content: agentResponseContent,
+          timestamp: new Date().toISOString(),
+        };
+        // Only save agent response to chat if user-initiated (depth === 0)
+        if (depth === 0) {
+          const finalChat = [...updatedChat, finalAgentMessage];
+          await fetch(`/api/memory/set`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              key: `agent:${agentId}:chat`,
+              value: finalChat,
+            }),
+          });
+        }
+        await AgentMemory.addMemory(agentId, {
+          type: "agent_response",
+          content: finalAgentMessage.content,
+          importance: 6,
+        });
+        return finalAgentMessage;
+      }
+      let toolCall: ToolCall | null = null;
       let loopCount = 0;
       let currentMessage = message;
       let currentContext = [...recentMessages];
       while (loopCount < 5) {
         // prevent infinite loops
         loopCount++;
-        // Try to parse for tool call
-        toolCall = null;
-        try {
-          const parsed = JSON.parse(agentResponseContent);
-          if (parsed && typeof parsed === "object" && parsed.tool_call) {
-            toolCall = parsed as ToolCall;
-          }
-        } catch {}
-        if (!toolCall) {
-          // No tool call, treat as final agent response
+        // If the new LLM response does not contain 'tool_call', treat as normal agent response and break
+        if (!agentResponseContent.includes("tool_call")) {
           finalAgentMessage = {
             role: "agent",
             content: agentResponseContent,
+            timestamp: new Date().toISOString(),
+          };
+          // Only save agent response to chat if user-initiated (depth === 0)
+          if (depth === 0) {
+            const finalChat = [...updatedChat, finalAgentMessage];
+            await fetch(`/api/memory/set`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                key: `agent:${agentId}:chat`,
+                value: finalChat,
+              }),
+            });
+          }
+          await AgentMemory.addMemory(agentId, {
+            type: "agent_response",
+            content: finalAgentMessage.content,
+            importance: 6,
+          });
+          return finalAgentMessage;
+        }
+        // Try to parse for tool call
+        toolCall = null;
+        let parseError: string | null = null;
+        try {
+          let toParse = agentResponseContent;
+          // If the response contains a Markdown code block, extract the JSON inside it
+          const codeBlockMatch = toParse.match(
+            /```(?:json)?\s*([\s\S]*?)\s*```/i
+          );
+          if (codeBlockMatch && codeBlockMatch[1]) {
+            toParse = codeBlockMatch[1];
+          }
+          // If there is leading/trailing text, try to extract the first JSON object
+          if (!toParse.trim().startsWith("{")) {
+            const jsonMatch = toParse.match(/\{[\s\S]*\}/);
+            if (jsonMatch && jsonMatch[0]) {
+              toParse = jsonMatch[0];
+            }
+          }
+          const parsed = JSON.parse(toParse);
+          if (parsed && typeof parsed === "object" && parsed.tool_call) {
+            toolCall = parsed as ToolCall;
+          }
+        } catch (err) {
+          parseError = err instanceof Error ? err.message : String(err);
+        }
+        if (!toolCall) {
+          // No tool call, treat as final agent response
+          // If there was a parse error, inform the user
+          finalAgentMessage = {
+            role: "agent",
+            content:
+              parseError && agentResponseContent.trim().length < 1000
+                ? `I tried to use a tool, but my response was not valid JSON and could not be parsed. Here is what I produced:\n\n${agentResponseContent}\n\nError: ${parseError}\n\nPlease try rephrasing your request or check the agent's configuration.`
+                : agentResponseContent,
             timestamp: new Date().toISOString(),
           };
           break;
@@ -705,8 +778,19 @@ export class AgentExecution {
         },
       });
 
-      // After autonomous task is completed (in runAutonomousTask), embed task result in shared vector DB
+      // After autonomous task is completed, embed comprehensive context
       SharedVectorDB.embedAgentAction(agent.id, task, agentRes);
+
+      // Also embed the task as a context chunk for future retrieval
+      SharedVectorDB.embedContextChunk(
+        agent.id,
+        `Autonomous Task: ${task}\nResult: ${agentRes}`,
+        {
+          taskType: "autonomous",
+          success: true,
+          importance: 8,
+        }
+      );
 
       return agentRes;
     } catch (error) {
@@ -720,7 +804,7 @@ export class AgentExecution {
   }
 
   /**
-   * Generate a response using AI service and real conversation context
+   * Generate a response using AI service with balanced context management
    */
   private static async generateAgentResponse(
     agent: Agent | null,
@@ -744,42 +828,169 @@ export class AgentExecution {
         throw new Error("No valid API keys found for AI service.");
       }
 
-      // Retrieve base context from long-term memory
-      const baseContext = await AgentMemory.getFact(agent.id, "base_context");
       const aiMessages = [];
+
+      // FIRST: Add base agent context (highest priority)
+      const baseContext = await AgentMemory.getFact(agent.id, "base_context");
       if (baseContext) {
-        aiMessages.push({ role: "system", content: baseContext });
+        aiMessages.push({
+          role: "system",
+          content: baseContext,
+          timestamp: new Date().toISOString(),
+        });
       }
-      // Add previous messages
-      aiMessages.push(
-        ...contextMessages.map((msg) => {
-          return {
+
+      // SECOND: Add recent conversation context (from contextMessages parameter)
+      if (contextMessages.length > 0) {
+        // Only add the most recent context messages to avoid overload
+        const recentContext = contextMessages.slice(-5);
+        aiMessages.push(
+          ...recentContext.map((msg) => ({
             role: msg.role,
             content: msg.content,
             timestamp: msg.timestamp,
-          };
-        })
+          }))
+        );
+      }
+
+      // THIRD: Add important memories (limited to prevent context overload)
+      // Only include important memories/tool results that are relevant to the current user message
+      const importantMemories = await AgentMemory.getImportantMemories(
+        agent.id,
+        10
       );
-      // Add the current user message
+      // Simple relevance filter: include if memory content contains a keyword from the user message
+      const userKeywords = message
+        .toLowerCase()
+        .split(/\W+/)
+        .filter((w) => w.length > 2);
+      const relevantMemories = importantMemories.filter((m) =>
+        userKeywords.some((kw) => m.content.toLowerCase().includes(kw))
+      );
+      // If no relevant memories, include only the most recent one for context
+      const memoriesToInclude =
+        relevantMemories.length > 0
+          ? relevantMemories.slice(0, 3)
+          : importantMemories.slice(0, 1);
+      if (memoriesToInclude.length > 0) {
+        const memoryContent = memoriesToInclude
+          .map((m) => `[${m.type.toUpperCase()}] ${m.content}`)
+          .join("\n");
+        aiMessages.push({
+          role: "system",
+          content: `## Relevant Context:\n${memoryContent}`,
+          timestamp: new Date().toISOString(),
+        });
+      }
+      // FOURTH: Add the current user message
       aiMessages.push({
         role: "user",
         content: message,
         timestamp: new Date().toISOString(),
       });
 
-      // Generate response using AI service
+      // Set maxTokens to 90% of the model's max context window, robust to model name variants
+      const modelKey = (agent.config.model || "").toLowerCase();
+      let maxContext = 3000;
+      if (
+        modelKey.includes("gpt-4-turbo") ||
+        modelKey.includes("gpt-4-1106-preview")
+      ) {
+        maxContext = 128000;
+      } else if (modelKey.includes("gpt-4")) {
+        maxContext = 8192;
+      } else if (modelKey.includes("gpt-3.5-turbo-16k")) {
+        maxContext = 16000;
+      } else if (modelKey.includes("gpt-3.5-turbo")) {
+        maxContext = 4096;
+      } else if (modelKey.includes("claude-3-opus")) {
+        maxContext = 200000;
+      } else if (modelKey.includes("claude-3-sonnet")) {
+        maxContext = 200000;
+      } else if (modelKey.includes("claude-3-haiku")) {
+        maxContext = 200000;
+      } else if (modelKey.includes("claude-2.1")) {
+        maxContext = 200000;
+      } else if (modelKey.includes("claude-2")) {
+        maxContext = 100000;
+      } else if (modelKey.includes("claude-instant-1")) {
+        maxContext = 100000;
+      } else if (
+        modelKey.includes("gemini-2.5-pro") ||
+        modelKey.includes("gemini-2.5-flash")
+      ) {
+        maxContext = 1048576;
+      } else if (modelKey.includes("llama-2-70b")) {
+        maxContext = 4096;
+      } else if (modelKey.includes("dialogpt-medium")) {
+        maxContext = 2048;
+      } else {
+        maxContext = 3000;
+      }
+
+      // Accurate token counting for OpenAI models using tiktoken
+      let promptTokens = 0;
+      try {
+        if (modelKey.includes("gpt-3.5") || modelKey.includes("gpt-4")) {
+          // @ts-expect-error: tiktoken has no type declarations
+          const { encoding_for_model } = await import("@dqbd/tiktoken");
+          const enc = encoding_for_model(
+            (agent.config.model || "gpt-3.5-turbo") as any
+          );
+          promptTokens = aiMessages.reduce(
+            (acc, m) => acc + enc.encode(m.content).length,
+            0
+          );
+          enc.free();
+        } else {
+          // Fallback for non-OpenAI models (rough estimate)
+          const promptText = aiMessages.map((m) => m.content).join(" ");
+          promptTokens = Math.ceil(promptText.split(/\s+/).length * 1.3);
+        }
+      } catch (err) {
+        // If tiktoken fails, fallback to rough estimate
+        const promptText = aiMessages.map((m) => m.content).join(" ");
+        promptTokens = Math.ceil(promptText.split(/\s+/).length * 1.3);
+      }
+      let maxTokens = Math.floor(maxContext * 0.9) - promptTokens;
+      if (maxTokens < 256) maxTokens = 256;
       const response = await AIService.generateResponse(
         aiMessages,
         agent.config.model,
         {
           temperature: 0.7,
-          maxTokens: agent.config.maxTokens || 1000,
+          maxTokens,
         }
       );
+
+      // Store the generated response for future context (but don't overload vector DB)
+      if (response.content.length > 50) {
+        // Only store meaningful responses
+        SharedVectorDB.embedContextChunk(
+          agent.id,
+          `Agent Response: ${response.content}`,
+          {
+            responseType: "generated",
+            messageContext: message.substring(0, 100),
+            importance: 6,
+          }
+        );
+      }
 
       return response.content;
     } catch (error) {
       console.error("Error generating AI response:", error);
+
+      // Store error context for learning
+      await AgentMemory.addMemory(agent.id, {
+        type: "observation",
+        content: `AI response generation failed: ${
+          error instanceof Error ? error.message : "Unknown error"
+        }`,
+        importance: 8,
+        metadata: { error: true, message },
+      });
+
       throw new Error(
         `Failed to generate agent response: ${
           error instanceof Error ? error.message : "Unknown error"
